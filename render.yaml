@@ -2,12 +2,12 @@ services:
   - type: web
     name: ovaview-scraper
     runtime: python
-    pythonVersion: 3.13
+    pythonVersion: 3.12
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --workers 1 --timeout 300 api_server:app
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13
+        value: 3.12
       - key: FLASK_ENV
         value: production
       - key: PORT
