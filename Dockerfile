@@ -1,13 +1,13 @@
 FROM python:3.13-slim
 
-WORKDIR /app/scrapy_crawler
+WORKDIR /app
 
 # Install dependencies
-COPY scrapy_crawler/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy crawler code
-COPY scrapy_crawler/ .
+COPY . .
 
-# Run scheduled crawler
-CMD ["python", "scheduled_runner.py"]
+# Run API server
+CMD ["gunicorn", "--workers", "1", "--timeout", "300", "api_server:app"]
