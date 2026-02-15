@@ -178,6 +178,9 @@ def server_error(error):
     }), 500
 
 
+# Export app for Gunicorn
+application = app
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') != 'production'
