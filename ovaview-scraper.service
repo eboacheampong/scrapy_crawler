@@ -1,0 +1,19 @@
+[Unit]
+Description=OvaView Scrapy Crawler Service
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/path/to/ovaview-v2/scrapy_crawler
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/python3.13 scheduled_runner.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ovaview-scraper
+
+[Install]
+WantedBy=multi-user.target
