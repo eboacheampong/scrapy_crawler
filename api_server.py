@@ -46,7 +46,7 @@ def health():
     }), 200
 
 
-@app.route('/api/scrape', methods=['POST', 'OPTIONS'])
+@app.route('/api/scrape', methods=['POST', 'GET', 'OPTIONS'])
 def scrape():
     """Trigger a scrape immediately"""
     if request.method == 'OPTIONS':
