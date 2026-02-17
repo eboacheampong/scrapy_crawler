@@ -91,6 +91,7 @@ def scrape():
         return jsonify({
             'success': True,
             'message': f'Scraped {len(all_articles)} articles from {len(source_stats)} sources',
+            'articles': all_articles,
             'stats': {
                 'total_articles': len(all_articles),
                 'sources': source_stats,
