@@ -73,7 +73,7 @@ class ScrapyArticleCrawler:
             containers = []
             for selector in article_selectors:
                 try:
-                    containers.extend(soup.select(selector)[:20])
+                    containers.extend(soup.select(selector)[:50])
                 except:
                     pass
             
@@ -81,7 +81,7 @@ class ScrapyArticleCrawler:
             containers = list(set(str(c) for c in containers))
             
             # Find articles with better title/description extraction
-            for container_str in containers[:30]:
+            for container_str in containers[:100]:
                 try:
                     # Re-parse to get BeautifulSoup object
                     container = BeautifulSoup(container_str, 'html.parser')
