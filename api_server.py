@@ -57,9 +57,20 @@ def scrape():
         body = request.get_json() or {}
         sources = body.get('sources', [
             ("https://news.ycombinator.com", "news", "technology"),
-            ("https://techcrunch.com", "news", "technology"),
-            ("https://www.theverge.com", "news", "technology"),
         ])
+        
+        # Normalize sources - handle both lists and tuples
+        normalized_sources = []
+        for source in sources:
+            if isinstance(source, (list, tuple)) and len(source) >= 2:
+                url = source[0]
+                spider_type = source[1] if len(source) > 1 else 'news'
+                industry = source[2] if len(source) > 2 else 'general'
+                normalized_sources.append((url, spider_type, industry))
+            elif isinstance(source, str):
+                normalized_sources.append((source, 'news', 'general'))
+        
+        sources = normalized_sources
         
         logger.info(f"Starting scrape with {len(sources)} sources")
         crawler = ScrapyArticleCrawler()
