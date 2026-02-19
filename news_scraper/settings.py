@@ -43,6 +43,6 @@ API_URL = "http://localhost:3000/api/daily-insights"
 # Logging
 LOG_LEVEL = 'INFO'
 
-# Enable and configure HTTP caching
-HTTPCACHE_ENABLED = True
-HTTPCACHE_EXPIRATION_SECS = 86400
+# Enable and configure HTTP caching (disabled for fresh results)
+HTTPCACHE_ENABLED = False
+# HTTPCACHE_EXPIRATION_SECS = 86400
