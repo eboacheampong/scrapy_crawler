@@ -190,6 +190,17 @@ def server_error(error):
     }), 500
 
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Handle all uncaught exceptions - always return JSON"""
+    logger.error(f"Unhandled exception: {e}", exc_info=True)
+    return jsonify({
+        'success': False,
+        'error': str(e),
+        'timestamp': datetime.now().isoformat()
+    }), 500
+
+
 # Export app for Gunicorn
 application = app
 

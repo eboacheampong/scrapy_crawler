@@ -7,10 +7,12 @@ import os
 import json
 import logging
 import hashlib
+import re
 from datetime import datetime, timedelta
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 from multiprocessing import Process, Queue
 from urllib.parse import urljoin, urlparse
+from dateutil import parser as date_parser
 
 # Set up logging
 logging.basicConfig(
@@ -22,6 +24,9 @@ logger = logging.getLogger(__name__)
 # Cache to track recently scraped URLs (prevents duplicates within session)
 _scraped_urls_cache: Set[str] = set()
 _cache_timestamp: datetime = datetime.now()
+
+# Only include articles from the last N days
+MAX_ARTICLE_AGE_DAYS = 7
 
 
 def _run_scrapy_spider(url: str, industry: str, result_queue: Queue):
@@ -67,11 +72,14 @@ class ScrapyArticleCrawler:
     1. Scrapy-Playwright for JS-heavy sites
     2. RSS feeds for sites that provide them
     3. BeautifulSoup fallback for simple sites
+    
+    Only includes articles from the last MAX_ARTICLE_AGE_DAYS days.
     """
     
     def __init__(self, api_url: str = "http://localhost:3000/api/daily-insights"):
         self.api_url = api_url
         self._reset_cache_if_stale()
+        self.cutoff_date = datetime.now() - timedelta(days=MAX_ARTICLE_AGE_DAYS)
     
     def _reset_cache_if_stale(self):
         """Reset URL cache every 30 minutes to allow re-scraping"""
@@ -92,6 +100,55 @@ class ScrapyArticleCrawler:
     def _mark_as_scraped(self, url: str):
         """Mark URL as scraped"""
         _scraped_urls_cache.add(self._url_hash(url))
+    
+    def _parse_date(self, date_str: Optional[str]) -> Optional[datetime]:
+        """Parse various date formats into datetime"""
+        if not date_str:
+            return None
+        try:
+            return date_parser.parse(date_str, fuzzy=True)
+        except:
+            return None
+    
+    def _extract_date_from_url(self, url: str) -> Optional[datetime]:
+        """Try to extract date from URL path (e.g., /2025/02/19/article-title)"""
+        # Match patterns like /2025/02/19/ or /2025-02-19/
+        patterns = [
+            r'/(\d{4})/(\d{1,2})/(\d{1,2})/',  # /2025/02/19/
+            r'/(\d{4})-(\d{1,2})-(\d{1,2})/',  # /2025-02-19/
+            r'/(\d{4})(\d{2})(\d{2})/',         # /20250219/
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                try:
+                    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                    if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                        return datetime(year, month, day)
+                except:
+                    continue
+        return None
+    
+    def _is_article_recent(self, article: dict) -> bool:
+        """Check if article is within the allowed date range"""
+        # Try published_at field first
+        pub_date = self._parse_date(article.get('published_at'))
+        if pub_date:
+            is_recent = pub_date >= self.cutoff_date
+            if not is_recent:
+                logger.debug(f"Skipping old article (published {pub_date.date()}): {article.get('title', '')[:50]}")
+            return is_recent
+        
+        # Try to extract date from URL
+        url_date = self._extract_date_from_url(article.get('url', ''))
+        if url_date:
+            is_recent = url_date >= self.cutoff_date
+            if not is_recent:
+                logger.debug(f"Skipping old article (URL date {url_date.date()}): {article.get('title', '')[:50]}")
+            return is_recent
+        
+        # If no date found, include it (benefit of the doubt for recent scrapes)
+        return True
     
     def scrape_with_scrapy(self, url: str, spider_type: str = "news", industry: str = "general") -> List[dict]:
         """
@@ -119,18 +176,27 @@ class ScrapyArticleCrawler:
             logger.info(f"Found {len(page_articles)} articles via page scrape")
             articles.extend(page_articles)
         
-        # Deduplicate by URL
+        # Deduplicate by URL and filter by date
         seen_urls = set()
         unique_articles = []
+        skipped_old = 0
+        
         for article in articles:
             article_url = article.get('url', '')
             if article_url and article_url not in seen_urls:
                 if not self._is_recently_scraped(article_url):
-                    seen_urls.add(article_url)
-                    unique_articles.append(article)
-                    self._mark_as_scraped(article_url)
+                    # Check if article is recent enough
+                    if self._is_article_recent(article):
+                        seen_urls.add(article_url)
+                        unique_articles.append(article)
+                        self._mark_as_scraped(article_url)
+                    else:
+                        skipped_old += 1
         
-        logger.info(f"Total unique new articles from {url}: {len(unique_articles)}")
+        if skipped_old > 0:
+            logger.info(f"Skipped {skipped_old} old articles (older than {MAX_ARTICLE_AGE_DAYS} days)")
+        
+        logger.info(f"Total unique recent articles from {url}: {len(unique_articles)}")
         return unique_articles
     
     def _try_rss_feed(self, base_url: str) -> List[dict]:
