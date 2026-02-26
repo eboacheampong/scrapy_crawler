@@ -556,6 +556,218 @@ class ScrapyArticleCrawler:
         
         logger.info(f"Saved {saved}/{len(articles)} articles")
         return True
+    
+    def scrape_social_media(self, keywords: List[str], platforms: List[str] = None) -> List[dict]:
+        """
+        Scrape social media platforms for posts matching keywords
+        
+        Args:
+            keywords: List of keywords to search for
+            platforms: List of platforms to search (twitter, youtube, linkedin, facebook)
+        
+        Returns:
+            List of social media posts with embed information
+        """
+        if not keywords:
+            logger.warning("No keywords provided for social media scraping")
+            return []
+        
+        platforms = platforms or ['twitter', 'youtube']
+        logger.info(f"Scraping social media for keywords: {keywords} on platforms: {platforms}")
+        
+        posts = []
+        
+        # Use BeautifulSoup-based approach for basic scraping
+        # For production, consider using official APIs
+        for keyword in keywords:
+            for platform in platforms:
+                try:
+                    platform_posts = self._scrape_social_platform(keyword, platform)
+                    posts.extend(platform_posts)
+                except Exception as e:
+                    logger.error(f"Error scraping {platform} for '{keyword}': {e}")
+        
+        # Deduplicate by post_id
+        seen_ids = set()
+        unique_posts = []
+        for post in posts:
+            post_key = f"{post.get('platform')}_{post.get('post_id')}"
+            if post_key not in seen_ids:
+                seen_ids.add(post_key)
+                unique_posts.append(post)
+        
+        logger.info(f"Found {len(unique_posts)} unique social media posts")
+        return unique_posts
+    
+    def _scrape_social_platform(self, keyword: str, platform: str) -> List[dict]:
+        """Scrape a specific social media platform"""
+        import requests
+        from urllib.parse import quote
+        
+        posts = []
+        platform = platform.lower()
+        
+        if platform == 'youtube':
+            # YouTube search via web scraping
+            posts = self._scrape_youtube_search(keyword)
+        
+        elif platform in ['twitter', 'x']:
+            # Twitter/X - limited without API
+            # For production, use Twitter API v2
+            logger.info(f"Twitter scraping requires API access for reliable results")
+            posts = []
+        
+        elif platform == 'facebook':
+            # Facebook - requires Graph API
+            logger.info(f"Facebook scraping requires Graph API access")
+            posts = []
+        
+        elif platform == 'linkedin':
+            # LinkedIn - requires API
+            logger.info(f"LinkedIn scraping requires API access")
+            posts = []
+        
+        return posts
+    
+    def _scrape_youtube_search(self, keyword: str) -> List[dict]:
+        """Scrape YouTube search results"""
+        import requests
+        from bs4 import BeautifulSoup
+        from urllib.parse import quote
+        import re
+        import json
+        
+        posts = []
+        
+        try:
+            search_url = f"https://www.youtube.com/results?search_query={quote(keyword)}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            
+            response = requests.get(search_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            # Extract JSON data from page
+            html = response.text
+            
+            # Find ytInitialData JSON
+            match = re.search(r'var ytInitialData = ({.*?});', html)
+            if match:
+                data = json.loads(match.group(1))
+                
+                # Navigate to video results
+                try:
+                    contents = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents']
+                    
+                    for section in contents:
+                        items = section.get('itemSectionRenderer', {}).get('contents', [])
+                        
+                        for item in items[:20]:
+                            video = item.get('videoRenderer')
+                            if not video:
+                                continue
+                            
+                            video_id = video.get('videoId')
+                            if not video_id:
+                                continue
+                            
+                            title = video.get('title', {}).get('runs', [{}])[0].get('text', '')
+                            channel = video.get('ownerText', {}).get('runs', [{}])[0].get('text', '')
+                            views_text = video.get('viewCountText', {}).get('simpleText', '0')
+                            
+                            # Parse view count
+                            views = 0
+                            if views_text:
+                                views_match = re.search(r'([\d,]+)', views_text.replace(',', ''))
+                                if views_match:
+                                    try:
+                                        views = int(views_match.group(1).replace(',', ''))
+                                    except:
+                                        pass
+                            
+                            # Get thumbnail
+                            thumbnails = video.get('thumbnail', {}).get('thumbnails', [])
+                            thumbnail = thumbnails[-1].get('url') if thumbnails else ''
+                            
+                            post_url = f"https://www.youtube.com/watch?v={video_id}"
+                            embed_url = f"https://www.youtube.com/embed/{video_id}"
+                            embed_html = f'<iframe width="100%" height="315" src="{embed_url}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>'
+                            
+                            posts.append({
+                                'platform': 'YOUTUBE',
+                                'post_id': video_id,
+                                'content': title,
+                                'author_handle': '',
+                                'author_name': channel,
+                                'post_url': post_url,
+                                'embed_url': embed_url,
+                                'embed_html': embed_html,
+                                'media_urls': [thumbnail] if thumbnail else [],
+                                'media_type': 'video',
+                                'views_count': views,
+                                'likes_count': 0,
+                                'comments_count': 0,
+                                'shares_count': 0,
+                                'hashtags': [],
+                                'mentions': [],
+                                'keywords': keyword,
+                                'posted_at': datetime.now().isoformat(),
+                                'scraped_at': datetime.now().isoformat(),
+                            })
+                except Exception as e:
+                    logger.error(f"Error parsing YouTube data: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error scraping YouTube: {e}")
+        
+        return posts
+    
+    def save_social_posts(self, posts: List[dict], api_url: str = None) -> int:
+        """Save social media posts to the API"""
+        import requests
+        
+        api_url = api_url or "http://localhost:3000/api/social-posts"
+        
+        if not posts:
+            return 0
+        
+        saved = 0
+        for post in posts:
+            try:
+                payload = {
+                    'platform': post.get('platform'),
+                    'postId': post.get('post_id'),
+                    'content': post.get('content'),
+                    'authorHandle': post.get('author_handle'),
+                    'authorName': post.get('author_name'),
+                    'postUrl': post.get('post_url'),
+                    'embedUrl': post.get('embed_url'),
+                    'embedHtml': post.get('embed_html'),
+                    'mediaUrls': post.get('media_urls', []),
+                    'mediaType': post.get('media_type'),
+                    'likesCount': post.get('likes_count', 0),
+                    'commentsCount': post.get('comments_count', 0),
+                    'sharesCount': post.get('shares_count', 0),
+                    'viewsCount': post.get('views_count', 0),
+                    'hashtags': post.get('hashtags', []),
+                    'mentions': post.get('mentions', []),
+                    'keywords': post.get('keywords'),
+                    'postedAt': post.get('posted_at'),
+                }
+                
+                response = requests.post(api_url, json=payload, timeout=10)
+                if response.status_code == 201:
+                    saved += 1
+                elif response.status_code == 409:
+                    # Already exists
+                    pass
+            except Exception as e:
+                logger.warning(f"Error saving social post: {e}")
+        
+        logger.info(f"Saved {saved}/{len(posts)} social posts")
+        return saved
 
 
 # Main execution for testing

@@ -201,6 +201,73 @@ def handle_exception(e):
     }), 500
 
 
+@app.route('/api/scrape/social', methods=['POST', 'OPTIONS'])
+def scrape_social():
+    """Scrape social media platforms for posts matching keywords"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        body = request.get_json() or {}
+        keywords = body.get('keywords', [])
+        platforms = body.get('platforms', ['youtube'])
+        save_to_api = body.get('save', False)
+        
+        if not keywords:
+            return jsonify({
+                'success': False,
+                'error': 'keywords array is required',
+                'timestamp': datetime.now().isoformat()
+            }), 400
+        
+        # Ensure keywords is a list
+        if isinstance(keywords, str):
+            keywords = [k.strip() for k in keywords.split(',')]
+        
+        logger.info(f"Scraping social media for keywords: {keywords} on platforms: {platforms}")
+        crawler = ScrapyArticleCrawler()
+        
+        posts = crawler.scrape_social_media(keywords, platforms)
+        
+        saved_count = 0
+        if save_to_api and posts:
+            saved_count = crawler.save_social_posts(posts)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Found {len(posts)} social media posts',
+            'posts': posts[:50],  # Return first 50
+            'total_count': len(posts),
+            'saved_count': saved_count,
+            'keywords': keywords,
+            'platforms': platforms,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Social scrape failed: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
+
+@app.route('/api/config', methods=['GET'])
+def get_config():
+    """Get crawler configuration"""
+    return jsonify({
+        'success': True,
+        'config': {
+            'max_article_age_days': 7,
+            'concurrent_requests': 4,
+            'download_delay': 2,
+            'supported_platforms': ['twitter', 'youtube', 'linkedin', 'facebook', 'instagram', 'tiktok'],
+        },
+        'timestamp': datetime.now().isoformat()
+    }), 200
+
+
 # Export app for Gunicorn
 application = app
 
