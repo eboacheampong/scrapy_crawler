@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 _scraped_urls_cache: Set[str] = set()
 _cache_timestamp: datetime = datetime.now()
 
-# Only include articles from the last N days
-MAX_ARTICLE_AGE_DAYS = 7
+# Only include articles from the last 24 hours
+MAX_ARTICLE_AGE_HOURS = 24
 
 
 def _run_scrapy_spider(url: str, industry: str, result_queue: Queue):
@@ -73,13 +73,13 @@ class ScrapyArticleCrawler:
     2. RSS feeds for sites that provide them
     3. BeautifulSoup fallback for simple sites
     
-    Only includes articles from the last MAX_ARTICLE_AGE_DAYS days.
+    Only includes articles from the last 24 hours.
     """
     
     def __init__(self, api_url: str = "http://localhost:3000/api/daily-insights"):
         self.api_url = api_url
         self._reset_cache_if_stale()
-        self.cutoff_date = datetime.now() - timedelta(days=MAX_ARTICLE_AGE_DAYS)
+        self.cutoff_date = datetime.now() - timedelta(hours=MAX_ARTICLE_AGE_HOURS)
     
     def _reset_cache_if_stale(self):
         """Reset URL cache every 30 minutes to allow re-scraping"""
@@ -134,25 +134,29 @@ class ScrapyArticleCrawler:
         return None
     
     def _is_article_recent(self, article: dict) -> bool:
-        """Check if article is within the allowed date range"""
+        """Check if article is within the last 24 hours"""
         # Try published_at field first
         pub_date = self._parse_date(article.get('published_at'))
         if pub_date:
             is_recent = pub_date >= self.cutoff_date
             if not is_recent:
-                logger.debug(f"Skipping old article (published {pub_date.date()}): {article.get('title', '')[:50]}")
+                logger.debug(f"Skipping old article (published {pub_date}): {article.get('title', '')[:50]}")
             return is_recent
         
         # Try to extract date from URL
         url_date = self._extract_date_from_url(article.get('url', ''))
         if url_date:
-            is_recent = url_date >= self.cutoff_date
+            # URL dates are day-level precision — accept if it's today or yesterday
+            today = datetime.now().date()
+            yesterday = (datetime.now() - timedelta(days=1)).date()
+            is_recent = url_date.date() >= yesterday
             if not is_recent:
                 logger.debug(f"Skipping old article (URL date {url_date.date()}): {article.get('title', '')[:50]}")
             return is_recent
         
-        # If no date found, include it (benefit of the doubt for recent scrapes)
-        return True
+        # No date found — reject it. We only want confirmed-recent articles.
+        logger.debug(f"Skipping article with no date: {article.get('title', '')[:50]}")
+        return False
     
     def scrape_with_scrapy(self, url: str, spider_type: str = "news", industry: str = "general") -> List[dict]:
         """
@@ -201,7 +205,7 @@ class ScrapyArticleCrawler:
                         skipped_old += 1
         
         if skipped_old > 0:
-            logger.info(f"Skipped {skipped_old} old articles (older than {MAX_ARTICLE_AGE_DAYS} days)")
+            logger.info(f"Skipped {skipped_old} old articles (older than {MAX_ARTICLE_AGE_HOURS} hours)")
         
         logger.info(f"Total unique recent articles from {url}: {len(unique_articles)}")
         return unique_articles

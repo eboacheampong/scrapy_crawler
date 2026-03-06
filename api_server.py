@@ -286,7 +286,7 @@ def get_config():
     return jsonify({
         'success': True,
         'config': {
-            'max_article_age_days': 7,
+            'max_article_age_hours': 24,
             'concurrent_requests': 4,
             'download_delay': 2,
             'supported_platforms': ['twitter', 'linkedin', 'facebook', 'instagram', 'tiktok'],
