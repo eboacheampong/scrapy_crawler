@@ -210,7 +210,7 @@ def scrape_social():
     try:
         body = request.get_json() or {}
         keywords = body.get('keywords', [])
-        platforms = body.get('platforms', ['youtube'])
+        platforms = body.get('platforms', ['youtube', 'twitter', 'tiktok', 'instagram', 'linkedin', 'facebook'])
         save_to_api = body.get('save', False)
         
         if not keywords:
