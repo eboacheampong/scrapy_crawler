@@ -608,24 +608,153 @@ class ScrapyArticleCrawler:
         platform = platform.lower()
         
         if platform == 'youtube':
-            # YouTube search via web scraping
             posts = self._scrape_youtube_search(keyword)
         
         elif platform in ['twitter', 'x']:
-            # Twitter/X - limited without API
-            # For production, use Twitter API v2
-            logger.info(f"Twitter scraping requires API access for reliable results")
-            posts = []
+            # Twitter/X via syndication or RSS bridge
+            posts = self._scrape_twitter_search(keyword)
         
         elif platform == 'facebook':
-            # Facebook - requires Graph API
-            logger.info(f"Facebook scraping requires Graph API access")
-            posts = []
+            # Facebook via Google search for public posts
+            posts = self._scrape_via_google(keyword, 'facebook.com', 'FACEBOOK')
         
         elif platform == 'linkedin':
-            # LinkedIn - requires API
-            logger.info(f"LinkedIn scraping requires API access")
-            posts = []
+            # LinkedIn via Google search for public posts
+            posts = self._scrape_via_google(keyword, 'linkedin.com/posts', 'LINKEDIN')
+        
+        return posts
+    
+    def _scrape_twitter_search(self, keyword: str) -> List[dict]:
+        """Scrape Twitter via syndication endpoint (Nitter is dead since Feb 2024)"""
+        import requests
+        import json
+        
+        posts = []
+        
+        try:
+            # Try RSS Bridge for Twitter search
+            bridge_url = f"https://rss-bridge.org/bridge01/?action=display&bridge=TwitterBridge&context=By+keyword&q={requests.utils.quote(keyword)}&format=Json"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json',
+            }
+            
+            response = requests.get(bridge_url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get('items', [])
+                
+                for item in items[:10]:
+                    content = (item.get('content_text') or item.get('title') or '').strip()
+                    if len(content) < 10:
+                        continue
+                    
+                    url = item.get('url', '')
+                    url_match = re.search(r'status/(\d+)', url)
+                    tweet_id = url_match.group(1) if url_match else f"rss_{hash(url)}"
+                    
+                    author = item.get('author', {}).get('name', '')
+                    
+                    posts.append({
+                        'platform': 'TWITTER',
+                        'post_id': tweet_id,
+                        'content': content[:500],
+                        'author_handle': f'@{author}' if author else '',
+                        'author_name': author,
+                        'post_url': url or f'https://twitter.com/search?q={requests.utils.quote(keyword)}',
+                        'embed_url': url,
+                        'embed_html': f'<blockquote class="twitter-tweet"><a href="{url}">Tweet</a></blockquote><script async src="https://platform.twitter.com/widgets.js"></script>',
+                        'media_urls': [],
+                        'media_type': 'text',
+                        'views_count': 0,
+                        'likes_count': 0,
+                        'comments_count': 0,
+                        'shares_count': 0,
+                        'hashtags': re.findall(r'#\w+', content),
+                        'mentions': re.findall(r'@\w+', content),
+                        'keywords': keyword,
+                        'posted_at': item.get('date_published', datetime.now().isoformat()),
+                        'scraped_at': datetime.now().isoformat(),
+                    })
+                
+                if posts:
+                    logger.info(f"[Twitter] Found {len(posts)} tweets via RSS Bridge")
+        except Exception as e:
+            logger.error(f"[Twitter] RSS Bridge error: {e}")
+        
+        return posts
+    
+    def _scrape_via_google(self, keyword: str, site_domain: str, platform: str) -> List[dict]:
+        """Scrape social posts by searching Google for site-specific results"""
+        import requests
+        from urllib.parse import quote
+        
+        posts = []
+        
+        try:
+            search_url = f"https://www.google.com/search?q=site:{site_domain}+{quote(keyword)}&tbs=qdr:w&num=10"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            
+            response = requests.get(search_url, headers=headers, timeout=15)
+            if response.status_code != 200:
+                logger.warning(f"[{platform}] Google search returned {response.status_code}")
+                return posts
+            
+            html = response.text
+            
+            # Extract URLs from Google results
+            url_pattern = rf'href="(https?://(?:www\.)?{re.escape(site_domain)}[^"&]+)"'
+            urls = list(set(re.findall(url_pattern, html)))[:10]
+            
+            # Extract titles
+            titles = re.findall(r'<h3[^>]*>([\s\S]*?)</h3>', html)
+            titles = [re.sub(r'<[^>]+>', '', t).strip() for t in titles]
+            
+            for i, url in enumerate(urls):
+                title = titles[i] if i < len(titles) else f'{platform} post about {keyword}'
+                
+                # Extract author from URL
+                if 'linkedin.com/posts/' in url:
+                    author_match = re.search(r'linkedin\.com/posts/([^_/]+)', url)
+                    author = author_match.group(1).replace('-', ' ') if author_match else ''
+                elif 'facebook.com/' in url:
+                    author_match = re.search(r'facebook\.com/([^/]+)/', url)
+                    author = author_match.group(1).replace('.', ' ') if author_match else ''
+                else:
+                    author = ''
+                
+                import base64
+                post_id = f"{platform.lower()[:2]}_{base64.b64encode(url.encode()).decode()[:20]}"
+                
+                posts.append({
+                    'platform': platform,
+                    'post_id': post_id,
+                    'content': title[:500],
+                    'author_handle': author,
+                    'author_name': author.title() if author else '',
+                    'post_url': url.split('&')[0],
+                    'embed_url': url.split('&')[0],
+                    'embed_html': '',
+                    'media_urls': [],
+                    'media_type': 'text',
+                    'views_count': 0,
+                    'likes_count': 0,
+                    'comments_count': 0,
+                    'shares_count': 0,
+                    'hashtags': re.findall(r'#\w+', title),
+                    'mentions': [],
+                    'keywords': keyword,
+                    'posted_at': datetime.now().isoformat(),
+                    'scraped_at': datetime.now().isoformat(),
+                })
+            
+            logger.info(f"[{platform}] Found {len(posts)} posts via Google")
+        except Exception as e:
+            logger.error(f"[{platform}] Google search error: {e}")
         
         return posts
     
