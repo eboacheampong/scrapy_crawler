@@ -561,24 +561,58 @@ class ScrapyArticleCrawler:
         """
         Scrape social media platforms for posts matching keywords.
         Only returns posts from the last 24 hours.
+        Delegates to the SocialScraper module for proper anti-detection.
+        YouTube is disabled.
         """
         if not keywords:
             logger.warning("No keywords provided for social media scraping")
             return []
         
-        platforms = platforms or ['youtube', 'twitter', 'tiktok', 'instagram', 'linkedin', 'facebook']
-        logger.info(f"Scraping social media for keywords: {keywords[:3]} on platforms: {platforms}")
+        try:
+            from social_scraper import SocialScraper
+            scraper = SocialScraper()
+            return scraper.scrape(keywords, platforms)
+        except ImportError:
+            logger.error("social_scraper module not found, falling back to basic Bing scraping")
+            # Minimal fallback if module import fails
+            return self._fallback_social_scrape(keywords, platforms)
+    
+    def _fallback_social_scrape(self, keywords: List[str], platforms: List[str] = None) -> List[dict]:
+        """Minimal fallback using Bing search if SocialScraper module is unavailable."""
+        platforms = platforms or ['twitter', 'instagram', 'facebook', 'linkedin', 'tiktok']
+        # Filter out youtube
+        platforms = [p for p in platforms if p.lower() != 'youtube']
         
         posts = []
+        site_map = {
+            'twitter': 'x.com',
+            'instagram': 'instagram.com',
+            'facebook': 'facebook.com',
+            'linkedin': 'linkedin.com/posts',
+            'tiktok': 'tiktok.com',
+        }
         
-        # Limit to 3 keywords to stay within time limits
         for keyword in keywords[:3]:
             for platform in platforms:
-                try:
-                    platform_posts = self._scrape_social_platform(keyword, platform)
-                    posts.extend(platform_posts)
-                except Exception as e:
-                    logger.error(f"Error scraping {platform} for '{keyword}': {e}")
+                pl = platform.lower()
+                if pl in site_map:
+                    try:
+                        result = self._scrape_via_bing(keyword, site_map[pl], pl.upper())
+                        posts.extend(result)
+                    except Exception as e:
+                        logger.error(f"Fallback scrape error for {pl}: {e}")
+        
+        # Deduplicate
+        seen_ids = set()
+        unique_posts = []
+        for post in posts:
+            post_key = f"{post.get('platform')}_{post.get('post_id')}"
+            if post_key not in seen_ids:
+                seen_ids.add(post_key)
+                unique_posts.append(post)
+        
+        logger.info(f"Found {len(unique_posts)} unique social media posts (fallback)")
+        return unique_posts
         
         # Deduplicate by post_id
         seen_ids = set()
@@ -592,162 +626,6 @@ class ScrapyArticleCrawler:
         logger.info(f"Found {len(unique_posts)} unique social media posts")
         return unique_posts
     
-    def _scrape_social_platform(self, keyword: str, platform: str) -> List[dict]:
-        """Scrape a specific social media platform"""
-        import requests
-        from urllib.parse import quote
-        
-        posts = []
-        platform = platform.lower()
-        
-        if platform == 'youtube':
-            posts = self._scrape_youtube_search(keyword)
-        
-        elif platform in ['twitter', 'x']:
-            posts = self._scrape_twitter_search(keyword)
-        
-        elif platform == 'facebook':
-            posts = self._scrape_via_bing(keyword, 'facebook.com', 'FACEBOOK')
-        
-        elif platform == 'linkedin':
-            posts = self._scrape_via_bing(keyword, 'linkedin.com/posts', 'LINKEDIN')
-        
-        elif platform == 'tiktok':
-            posts = self._scrape_via_bing(keyword, 'tiktok.com', 'TIKTOK')
-        
-        elif platform == 'instagram':
-            posts = self._scrape_via_bing(keyword, 'instagram.com', 'INSTAGRAM')
-        
-        return posts
-    
-    def _scrape_twitter_search(self, keyword: str) -> List[dict]:
-        """Scrape Twitter via Nitter instances, RSS Bridge, and Bing fallback"""
-        import requests
-        
-        posts = []
-        cutoff = datetime.now() - timedelta(hours=24)
-        
-        # Strategy 1: Nitter instances (some community forks still work)
-        nitter_instances = [
-            'https://nitter.privacydev.net',
-            'https://nitter.poast.org',
-            'https://nitter.woodland.cafe',
-        ]
-        
-        for instance in nitter_instances:
-            if posts:
-                break
-            try:
-                since_date = cutoff.strftime('%Y-%m-%d')
-                url = f"{instance}/search?f=tweets&q={requests.utils.quote(keyword)}&since={since_date}"
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                response = requests.get(url, headers=headers, timeout=12)
-                if response.status_code != 200:
-                    continue
-                html = response.text
-                
-                blocks = html.split('class="timeline-item"')[1:11]
-                for block in blocks:
-                    link_match = re.search(r'href="/([^/]+)/status/(\d+)"', block)
-                    if not link_match:
-                        continue
-                    username = link_match.group(1)
-                    tweet_id = link_match.group(2)
-                    
-                    content_match = re.search(r'class="tweet-content[^"]*"[^>]*>([\s\S]*?)</div>', block)
-                    content = re.sub(r'<[^>]+>', ' ', content_match.group(1)).strip() if content_match else ''
-                    if len(content) < 5:
-                        continue
-                    
-                    name_match = re.search(r'class="fullname"[^>]*>([^<]+)<', block)
-                    
-                    posts.append({
-                        'platform': 'TWITTER',
-                        'post_id': tweet_id,
-                        'content': content[:500],
-                        'author_handle': f'@{username}',
-                        'author_name': name_match.group(1).strip() if name_match else username,
-                        'post_url': f'https://x.com/{username}/status/{tweet_id}',
-                        'embed_url': f'https://x.com/{username}/status/{tweet_id}',
-                        'embed_html': f'<blockquote class="twitter-tweet"><a href="https://x.com/{username}/status/{tweet_id}">Tweet</a></blockquote><script async src="https://platform.twitter.com/widgets.js"></script>',
-                        'media_urls': [],
-                        'media_type': 'text',
-                        'views_count': 0,
-                        'likes_count': 0,
-                        'comments_count': 0,
-                        'shares_count': 0,
-                        'hashtags': re.findall(r'#\w+', content),
-                        'mentions': re.findall(r'@\w+', content),
-                        'keywords': keyword,
-                        'posted_at': datetime.now().isoformat(),
-                        'scraped_at': datetime.now().isoformat(),
-                    })
-                
-                if posts:
-                    logger.info(f"[Twitter] Nitter ({instance}) found {len(posts)} tweets")
-            except Exception as e:
-                logger.debug(f"[Twitter] Nitter {instance} failed: {e}")
-                continue
-        
-        # Strategy 2: RSS Bridge
-        if not posts:
-            # Try RSS Bridge for Twitter search
-            bridge_url = f"https://rss-bridge.org/bridge01/?action=display&bridge=TwitterBridge&context=By+keyword&q={requests.utils.quote(keyword)}&format=Json"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json',
-            }
-            
-            response = requests.get(bridge_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get('items', [])
-                
-                for item in items[:10]:
-                    content = (item.get('content_text') or item.get('title') or '').strip()
-                    if len(content) < 10:
-                        continue
-                    
-                    url = item.get('url', '')
-                    url_match = re.search(r'status/(\d+)', url)
-                    tweet_id = url_match.group(1) if url_match else f"rss_{hash(url)}"
-                    
-                    author = item.get('author', {}).get('name', '')
-                    
-                    posts.append({
-                        'platform': 'TWITTER',
-                        'post_id': tweet_id,
-                        'content': content[:500],
-                        'author_handle': f'@{author}' if author else '',
-                        'author_name': author,
-                        'post_url': url or f'https://twitter.com/search?q={requests.utils.quote(keyword)}',
-                        'embed_url': url,
-                        'embed_html': f'<blockquote class="twitter-tweet"><a href="{url}">Tweet</a></blockquote><script async src="https://platform.twitter.com/widgets.js"></script>',
-                        'media_urls': [],
-                        'media_type': 'text',
-                        'views_count': 0,
-                        'likes_count': 0,
-                        'comments_count': 0,
-                        'shares_count': 0,
-                        'hashtags': re.findall(r'#\w+', content),
-                        'mentions': re.findall(r'@\w+', content),
-                        'keywords': keyword,
-                        'posted_at': item.get('date_published', datetime.now().isoformat()),
-                        'scraped_at': datetime.now().isoformat(),
-                    })
-                
-                if posts:
-                    logger.info(f"[Twitter] Found {len(posts)} tweets via RSS Bridge")
-        except Exception as e:
-            logger.error(f"[Twitter] RSS Bridge error: {e}")
-        
-        # Strategy 3: Bing search fallback
-        if not posts:
-            posts = self._scrape_via_bing(keyword, 'x.com OR site:twitter.com', 'TWITTER')
-            if posts:
-                logger.info(f"[Twitter] Bing found {len(posts)} tweets")
-        
-        return posts
     
     def _scrape_via_bing(self, keyword: str, site_domain: str, platform: str) -> List[dict]:
         """Scrape social posts by searching Bing for site-specific results (last 24h)"""
@@ -852,99 +730,6 @@ class ScrapyArticleCrawler:
             logger.info(f"[{platform}] Found {len(posts)} posts via Bing")
         except Exception as e:
             logger.error(f"[{platform}] Bing search error: {e}")
-        
-        return posts
-    
-    def _scrape_youtube_search(self, keyword: str) -> List[dict]:
-        """Scrape YouTube search results — filtered to today's uploads only"""
-        import requests
-        from urllib.parse import quote
-        import json
-        
-        posts = []
-        
-        try:
-            # sp=EgIIAQ== means "Upload date: Today"
-            search_url = f"https://www.youtube.com/results?search_query={quote(keyword)}&sp=EgIIAQ%3D%3D"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-            
-            response = requests.get(search_url, headers=headers, timeout=15)
-            response.raise_for_status()
-            
-            html = response.text
-            
-            # Find ytInitialData JSON
-            match = re.search(r'var ytInitialData = ({.*?});', html)
-            if match:
-                data = json.loads(match.group(1))
-                
-                # Navigate to video results
-                try:
-                    contents = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents']
-                    
-                    for section in contents:
-                        items = section.get('itemSectionRenderer', {}).get('contents', [])
-                        
-                        for item in items[:20]:
-                            video = item.get('videoRenderer')
-                            if not video:
-                                continue
-                            
-                            video_id = video.get('videoId')
-                            if not video_id:
-                                continue
-                            
-                            title = video.get('title', {}).get('runs', [{}])[0].get('text', '')
-                            channel = video.get('ownerText', {}).get('runs', [{}])[0].get('text', '')
-                            views_text = video.get('viewCountText', {}).get('simpleText', '0')
-                            
-                            # Parse view count
-                            views = 0
-                            if views_text:
-                                views_match = re.search(r'([\d,]+)', views_text.replace(',', ''))
-                                if views_match:
-                                    try:
-                                        views = int(views_match.group(1).replace(',', ''))
-                                    except:
-                                        pass
-                            
-                            # Get thumbnail
-                            thumbnails = video.get('thumbnail', {}).get('thumbnails', [])
-                            thumbnail = thumbnails[-1].get('url') if thumbnails else ''
-                            
-                            post_url = f"https://www.youtube.com/watch?v={video_id}"
-                            embed_url = f"https://www.youtube.com/embed/{video_id}"
-                            embed_html = f'<iframe width="100%" height="315" src="{embed_url}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>'
-                            
-                            posts.append({
-                                'platform': 'YOUTUBE',
-                                'post_id': video_id,
-                                'content': title,
-                                'author_handle': '',
-                                'author_name': channel,
-                                'post_url': post_url,
-                                'embed_url': embed_url,
-                                'embed_html': embed_html,
-                                'media_urls': [thumbnail] if thumbnail else [],
-                                'media_type': 'video',
-                                'views_count': views,
-                                'likes_count': 0,
-                                'comments_count': 0,
-                                'shares_count': 0,
-                                'hashtags': [],
-                                'mentions': [],
-                                'keywords': keyword,
-                                'posted_at': datetime.now().isoformat(),
-                                'scraped_at': datetime.now().isoformat(),
-                            })
-                except Exception as e:
-                    logger.error(f"Error parsing YouTube data: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error scraping YouTube: {e}")
         
         return posts
     

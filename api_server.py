@@ -210,7 +210,7 @@ def scrape_social():
     try:
         body = request.get_json() or {}
         keywords = body.get('keywords', [])
-        platforms = body.get('platforms', ['youtube', 'twitter', 'tiktok', 'instagram', 'linkedin', 'facebook'])
+        platforms = body.get('platforms', ['twitter', 'tiktok', 'instagram', 'linkedin', 'facebook'])
         save_to_api = body.get('save', False)
         
         if not keywords:
@@ -262,7 +262,7 @@ def get_config():
             'max_article_age_days': 7,
             'concurrent_requests': 4,
             'download_delay': 2,
-            'supported_platforms': ['twitter', 'youtube', 'linkedin', 'facebook', 'instagram', 'tiktok'],
+            'supported_platforms': ['twitter', 'linkedin', 'facebook', 'instagram', 'tiktok'],
         },
         'timestamp': datetime.now().isoformat()
     }), 200

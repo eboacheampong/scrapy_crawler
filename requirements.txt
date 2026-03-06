@@ -10,3 +10,4 @@ apscheduler==3.10.4
 python-dotenv==1.0.0
 lxml==6.0.2
 gunicorn==21.2.0
+snscrape>=0.7.0.20230622
