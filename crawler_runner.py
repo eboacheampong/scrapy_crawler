@@ -613,18 +613,6 @@ class ScrapyArticleCrawler:
         
         logger.info(f"Found {len(unique_posts)} unique social media posts (fallback)")
         return unique_posts
-        
-        # Deduplicate by post_id
-        seen_ids = set()
-        unique_posts = []
-        for post in posts:
-            post_key = f"{post.get('platform')}_{post.get('post_id')}"
-            if post_key not in seen_ids:
-                seen_ids.add(post_key)
-                unique_posts.append(post)
-        
-        logger.info(f"Found {len(unique_posts)} unique social media posts")
-        return unique_posts
     
     
     def _scrape_via_bing(self, keyword: str, site_domain: str, platform: str) -> List[dict]:
