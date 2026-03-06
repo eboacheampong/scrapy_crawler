@@ -102,11 +102,15 @@ class ScrapyArticleCrawler:
         _scraped_urls_cache.add(self._url_hash(url))
     
     def _parse_date(self, date_str: Optional[str]) -> Optional[datetime]:
-        """Parse various date formats into datetime"""
+        """Parse various date formats into a NAIVE (no timezone) datetime"""
         if not date_str:
             return None
         try:
-            return date_parser.parse(date_str, fuzzy=True)
+            parsed = date_parser.parse(date_str, fuzzy=True)
+            # Strip timezone info to avoid offset-naive vs offset-aware comparison errors
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            return parsed
         except:
             return None
     
@@ -152,7 +156,8 @@ class ScrapyArticleCrawler:
     
     def scrape_with_scrapy(self, url: str, spider_type: str = "news", industry: str = "general") -> List[dict]:
         """
-        Main scraping method - tries multiple strategies
+        Main scraping method - tries multiple strategies.
+        Stops early if enough articles found to save time.
         """
         logger.info(f"Scraping {url} (type: {spider_type}, industry: {industry})")
         
@@ -164,17 +169,19 @@ class ScrapyArticleCrawler:
             logger.info(f"Found {len(rss_articles)} articles via RSS")
             articles.extend(rss_articles)
         
-        # Strategy 2: Try sitemap for comprehensive coverage
-        sitemap_articles = self._try_sitemap(url)
-        if sitemap_articles:
-            logger.info(f"Found {len(sitemap_articles)} articles via sitemap")
-            articles.extend(sitemap_articles)
+        # Strategy 2: Try sitemap only if RSS found fewer than 5 articles
+        if len(articles) < 5:
+            sitemap_articles = self._try_sitemap(url)
+            if sitemap_articles:
+                logger.info(f"Found {len(sitemap_articles)} articles via sitemap")
+                articles.extend(sitemap_articles)
         
-        # Strategy 3: Scrape the main page with BeautifulSoup
-        page_articles = self._scrape_page(url, industry)
-        if page_articles:
-            logger.info(f"Found {len(page_articles)} articles via page scrape")
-            articles.extend(page_articles)
+        # Strategy 3: Scrape the main page only if we still have fewer than 5
+        if len(articles) < 5:
+            page_articles = self._scrape_page(url, industry)
+            if page_articles:
+                logger.info(f"Found {len(page_articles)} articles via page scrape")
+                articles.extend(page_articles)
         
         # Deduplicate by URL and filter by date
         seen_urls = set()

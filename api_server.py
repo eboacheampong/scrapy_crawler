@@ -79,34 +79,61 @@ def scrape():
         errors = []
         source_stats = {}
         
-        for url, spider_type, industry in sources:
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        GLOBAL_TIMEOUT = 90  # Must finish within 90s so Vercel gets the response before its 120s timeout
+        start_time = time.time()
+        
+        def scrape_one_source(url, spider_type, industry):
+            """Scrape a single source with a per-source time limit."""
             try:
-                logger.info(f"Scraping {url}...")
                 articles = crawler.scrape_with_scrapy(url, spider_type, industry)
-                all_articles.extend(articles)
-                source_stats[url] = {
-                    'count': len(articles),
-                    'status': 'success'
-                }
-                logger.info(f"✓ Scraped {len(articles)} articles from {url}")
+                return url, articles, None
             except Exception as e:
-                error_msg = f"Error scraping {url}: {str(e)}"
-                logger.error(error_msg)
-                errors.append(error_msg)
-                source_stats[url] = {
-                    'count': 0,
-                    'status': 'error',
-                    'error': error_msg
-                }
+                return url, [], str(e)
+        
+        # Run sources in parallel (max 4 concurrent to avoid overwhelming the server)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(scrape_one_source, url, st, ind): url
+                for url, st, ind in sources
+            }
+            
+            for future in as_completed(futures, timeout=GLOBAL_TIMEOUT):
+                url = futures[future]
+                elapsed = time.time() - start_time
+                if elapsed > GLOBAL_TIMEOUT:
+                    logger.warning(f"Global timeout reached ({elapsed:.0f}s), stopping")
+                    break
+                
+                try:
+                    src_url, articles, error = future.result(timeout=5)
+                    if error:
+                        logger.error(f"Error scraping {src_url}: {error}")
+                        errors.append(f"Error scraping {src_url}: {error}")
+                        source_stats[src_url] = {'count': 0, 'status': 'error', 'error': error}
+                    else:
+                        all_articles.extend(articles)
+                        source_stats[src_url] = {'count': len(articles), 'status': 'success'}
+                        logger.info(f"✓ Scraped {len(articles)} articles from {src_url}")
+                except Exception as e:
+                    logger.error(f"Error scraping {url}: {e}")
+                    errors.append(f"Error scraping {url}: {str(e)}")
+                    source_stats[url] = {'count': 0, 'status': 'error', 'error': str(e)}
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Scrape completed in {elapsed:.1f}s: {len(all_articles)} articles from {len(source_stats)} sources")
         
         return jsonify({
             'success': True,
-            'message': f'Scraped {len(all_articles)} articles from {len(source_stats)} sources',
+            'message': f'Scraped {len(all_articles)} articles from {len(source_stats)} sources in {elapsed:.0f}s',
             'articles': all_articles,
             'stats': {
                 'total_articles': len(all_articles),
                 'sources': source_stats,
-                'errors': errors
+                'errors': errors,
+                'elapsed_seconds': round(elapsed, 1)
             },
             'timestamp': datetime.now().isoformat()
         }), 200
