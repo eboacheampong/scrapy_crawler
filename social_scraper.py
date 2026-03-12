@@ -1,22 +1,21 @@
 """
 Social Media Scraper Module — Production-grade, multi-source.
 
-Uses dedicated free Python libraries per platform:
-  1. twscrape       — Twitter/X (GraphQL API, requires account cookies)
-  2. facebook-scraper — Facebook (public pages, no API key)
-  3. instaloader    — Instagram (public profiles/hashtags, no API key)
-  4. linkedin-api   — LinkedIn (requires LinkedIn account cookies)
-  5. TikTokApi      — TikTok (unofficial API, uses Playwright)
-  6. Reddit JSON    — Reddit (public, no auth)
-  7. Bing search    — Fallback for all platforms
+Priority order:
+  0. ScrapeCreators  — PAID PRIMARY (unified API, all platforms, 1 credit/request)
+  1. twscrape        — Twitter/X free fallback (GraphQL API)
+  2. facebook-scraper — Facebook free fallback (public pages)
+  3. instaloader     — Instagram free fallback (public profiles/hashtags)
+  4. linkedin-api    — LinkedIn free fallback (requires account)
+  5. TikTokApi       — TikTok free fallback (unofficial API)
+  6. Reddit JSON     — Reddit (public, no auth)
+  7. Bing search     — Last-resort fallback for all platforms
 
-Each scraper is isolated: if one library fails to import or breaks,
-the others keep working. Results are merged and deduplicated.
+ScrapeCreators runs first. If it returns results, free libraries are skipped.
+If SCRAPECREATORS_API_KEY is not set, falls back to free libraries + Bing.
 
-Anti-detection:
-  - Rotating User-Agent pool (for Bing/Reddit fallbacks)
-  - Random sleep between requests
-  - Session reuse with retry logic
+Each scraper is isolated: if one fails, the others keep working.
+Results are merged and deduplicated.
 """
 
 import re
@@ -189,7 +188,546 @@ def _post(platform, post_id, content, keyword, post_url,
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SOURCE 1: TWSCRAPE — Twitter/X
+# SOURCE 0: SCRAPECREATORS — Paid unified API (PRIMARY)
+# ═══════════════════════════════════════════════════════════════════════════
+
+SCRAPECREATORS_BASE = 'https://api.scrapecreators.com/v1'
+
+# ── Credit budget tracking ───────────────────────────────────────────────
+# Controls how many ScrapeCreators API calls are made per scrape run.
+# Each API call = 1 credit. Default budget = 10 (safe for free tier testing).
+# Set SCRAPECREATORS_BUDGET env var to override (e.g. 50 for paid plans).
+import threading
+
+class _CreditBudget:
+    """Thread-safe credit budget tracker for a single scrape run."""
+    def __init__(self, limit):
+        self._limit = limit
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def try_spend(self, amount=1):
+        """Try to spend credits. Returns True if within budget, False if over."""
+        with self._lock:
+            if self._used + amount > self._limit:
+                return False
+            self._used += amount
+            return True
+
+    @property
+    def used(self):
+        with self._lock:
+            return self._used
+
+    @property
+    def remaining(self):
+        with self._lock:
+            return max(0, self._limit - self._used)
+
+# Global budget instance — reset per scrape run in SocialScraper.scrape()
+_sc_budget = _CreditBudget(int(os.environ.get('SCRAPECREATORS_BUDGET', '10')))
+
+# Maps our platform names to ScrapeCreators endpoint paths + params
+_SC_ENDPOINTS = {
+    'twitter': {
+        'search': '/twitter/user/tweets',       # Get tweets from a user
+        'profile': '/twitter/profile',           # Get profile info
+    },
+    'instagram': {
+        'search': '/instagram/search/reels',     # Search reels by keyword
+        'profile': '/instagram/profile',         # Get profile + recent posts
+        'posts': '/instagram/user/posts',        # Get user posts
+    },
+    'facebook': {
+        'search': '/facebook/profile/posts',     # Get page posts
+        'profile': '/facebook/profile',          # Get profile info
+    },
+    'linkedin': {
+        'search': '/linkedin/company/posts',     # Get company posts
+        'profile': '/linkedin/person/profile',   # Get person profile
+    },
+    'tiktok': {
+        'search': '/tiktok/search/keyword',      # Search by keyword
+        'hashtag': '/tiktok/search/hashtag',      # Search by hashtag
+        'profile': '/tiktok/profile',            # Get profile info
+    },
+}
+
+
+def _scrape_scrapecreators(keyword, platform, session):
+    """
+    Scrape a single platform for a keyword using ScrapeCreators API.
+    Each API call costs 1 credit. Respects the global _sc_budget.
+    """
+    global _sc_budget
+    api_key = os.environ.get('SCRAPECREATORS_API_KEY', '')
+    if not api_key:
+        return []
+
+    posts = []
+    cutoff = _cutoff()
+    platform_lower = platform.lower()
+    platform_upper = platform.upper()
+
+    headers = {
+        'x-api-key': api_key,
+        'Accept': 'application/json',
+    }
+
+    def _sc_get(url):
+        """Make a ScrapeCreators API call, respecting the credit budget."""
+        if not _sc_budget.try_spend(1):
+            logger.info(f"[ScrapeCreators] Budget exhausted ({_sc_budget.used}/{_sc_budget._limit}), skipping: {url.split('?')[0]}")
+            return None
+        logger.debug(f"[ScrapeCreators] Credit {_sc_budget.used}/{_sc_budget._limit}: {url.split('?')[0]}")
+        resp = session.get(url, headers=headers, timeout=20)
+        return resp
+
+    try:
+        # ── TWITTER ──────────────────────────────────────────────────
+        if platform_lower == 'twitter':
+            # Search for the keyword as a username/handle first
+            # Then also try keyword search via profile tweets
+            results = []
+
+            # Strategy 1: Search keyword as handle (if it looks like a handle)
+            clean_kw = keyword.strip().replace(' ', '').lower()
+            try:
+                url = f"{SCRAPECREATORS_BASE}/twitter/profile?handle={quote(clean_kw)}"
+                resp = _sc_get(url)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('success') and data.get('data'):
+                        profile = data['data']
+                        # Get their recent tweets
+                        tweets_url = f"{SCRAPECREATORS_BASE}/twitter/user/tweets?handle={quote(clean_kw)}"
+                        tweets_resp = _sc_get(tweets_url)
+                        if tweets_resp and tweets_resp.status_code == 200:
+                            tweets_data = tweets_resp.json()
+                            tweet_list = tweets_data.get('data', {}).get('tweets', [])
+                            if isinstance(tweet_list, list):
+                                results.extend(tweet_list)
+            except Exception as e:
+                logger.debug(f"[ScrapeCreators] Twitter profile search error: {e}")
+
+            for tweet in results[:20]:
+                try:
+                    text = tweet.get('text') or tweet.get('full_text') or ''
+                    tweet_id = tweet.get('id_str') or tweet.get('id') or ''
+                    created = tweet.get('created_at') or ''
+                    user = tweet.get('user', {}) or {}
+
+                    posted_at = datetime.now()
+                    if created:
+                        try:
+                            posted_at = datetime.strptime(created, '%a %b %d %H:%M:%S %z %Y').replace(tzinfo=None)
+                        except Exception:
+                            try:
+                                from dateutil import parser as dp
+                                posted_at = dp.parse(created).replace(tzinfo=None)
+                            except Exception:
+                                pass
+
+                    if posted_at < cutoff:
+                        continue
+
+                    handle = user.get('screen_name') or user.get('username') or clean_kw
+                    tweet_url = f"https://x.com/{handle}/status/{tweet_id}" if tweet_id else ''
+                    if not tweet_url:
+                        continue
+
+                    hashtags_list = re.findall(r'#(\w+)', text)
+                    mentions_list = re.findall(r'@(\w+)', text)
+
+                    media_urls = []
+                    media_type = 'text'
+                    media = tweet.get('media', []) or tweet.get('entities', {}).get('media', []) or []
+                    if media:
+                        for m in media[:5]:
+                            murl = m.get('media_url_https') or m.get('media_url') or ''
+                            if murl:
+                                media_urls.append(murl)
+                        if any(m.get('type') == 'video' for m in media):
+                            media_type = 'video'
+                        elif media_urls:
+                            media_type = 'image'
+
+                    posts.append(_post(
+                        platform='TWITTER',
+                        post_id=str(tweet_id),
+                        content=text,
+                        keyword=keyword,
+                        post_url=tweet_url,
+                        author_name=user.get('name', ''),
+                        author_handle=handle,
+                        media_type=media_type,
+                        media_urls=media_urls,
+                        hashtags=hashtags_list,
+                        mentions=mentions_list,
+                        likes_count=tweet.get('favorite_count', 0) or tweet.get('likes', 0),
+                        comments_count=tweet.get('reply_count', 0),
+                        shares_count=tweet.get('retweet_count', 0),
+                        views_count=tweet.get('views', 0) or tweet.get('view_count', 0),
+                        posted_at=posted_at,
+                    ))
+                except Exception as e:
+                    logger.debug(f"[ScrapeCreators] Twitter post parse error: {e}")
+
+        # ── INSTAGRAM ────────────────────────────────────────────────
+        elif platform_lower == 'instagram':
+            # Search reels by keyword (uses Google search under the hood)
+            try:
+                url = f"{SCRAPECREATORS_BASE}/instagram/search/reels?keyword={quote(keyword)}"
+                resp = _sc_get(url)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get('data', []) or []
+                    if isinstance(items, list):
+                        for item in items[:20]:
+                            try:
+                                shortcode = item.get('shortcode') or item.get('code') or ''
+                                post_url = item.get('url') or (f"https://www.instagram.com/reel/{shortcode}/" if shortcode else '')
+                                if not post_url:
+                                    continue
+
+                                content = item.get('caption') or item.get('text') or item.get('description') or ''
+                                author = item.get('owner', {}).get('username', '') or item.get('username', '')
+                                posted_at = datetime.now()
+
+                                timestamp = item.get('taken_at') or item.get('timestamp') or item.get('created_at')
+                                if timestamp:
+                                    try:
+                                        if isinstance(timestamp, (int, float)):
+                                            posted_at = datetime.utcfromtimestamp(timestamp)
+                                        else:
+                                            from dateutil import parser as dp
+                                            posted_at = dp.parse(str(timestamp)).replace(tzinfo=None)
+                                    except Exception:
+                                        pass
+
+                                if posted_at < cutoff:
+                                    continue
+
+                                post_id = shortcode or _make_id(post_url, 'INSTAGRAM')
+                                hashtags_list = re.findall(r'#(\w+)', content)
+                                mentions_list = re.findall(r'@(\w+)', content)
+
+                                posts.append(_post(
+                                    platform='INSTAGRAM',
+                                    post_id=post_id,
+                                    content=content,
+                                    keyword=keyword,
+                                    post_url=post_url,
+                                    author_name=author,
+                                    author_handle=author,
+                                    media_type='video',
+                                    hashtags=hashtags_list,
+                                    mentions=mentions_list,
+                                    likes_count=item.get('like_count', 0) or item.get('likes', 0),
+                                    comments_count=item.get('comment_count', 0) or item.get('comments', 0),
+                                    views_count=item.get('play_count', 0) or item.get('views', 0),
+                                    posted_at=posted_at,
+                                ))
+                            except Exception as e:
+                                logger.debug(f"[ScrapeCreators] IG post parse error: {e}")
+            except Exception as e:
+                logger.debug(f"[ScrapeCreators] Instagram search error: {e}")
+
+            # Also try profile if keyword looks like a username
+            if not posts:
+                try:
+                    clean_kw = keyword.strip().replace(' ', '').lower()
+                    url = f"{SCRAPECREATORS_BASE}/instagram/profile?handle={quote(clean_kw)}"
+                    resp = _sc_get(url)
+                    if resp and resp.status_code == 200:
+                        data = resp.json()
+                        recent = data.get('data', {}).get('recent_posts', []) or []
+                        for item in recent[:10]:
+                            try:
+                                shortcode = item.get('shortcode') or item.get('code') or ''
+                                post_url = item.get('url') or (f"https://www.instagram.com/p/{shortcode}/" if shortcode else '')
+                                if not post_url:
+                                    continue
+                                content = item.get('caption') or ''
+                                post_id = shortcode or _make_id(post_url, 'INSTAGRAM')
+
+                                # Check timestamp if available
+                                posted_at = datetime.now()
+                                ts = item.get('taken_at') or item.get('timestamp')
+                                if ts and isinstance(ts, (int, float)):
+                                    try:
+                                        posted_at = datetime.utcfromtimestamp(ts)
+                                    except Exception:
+                                        pass
+                                if posted_at < cutoff:
+                                    continue
+
+                                posts.append(_post(
+                                    platform='INSTAGRAM',
+                                    post_id=post_id,
+                                    content=content,
+                                    keyword=keyword,
+                                    post_url=post_url,
+                                    author_name=clean_kw,
+                                    author_handle=clean_kw,
+                                    likes_count=item.get('like_count', 0),
+                                    comments_count=item.get('comment_count', 0),
+                                    posted_at=datetime.now(),
+                                ))
+                            except Exception:
+                                continue
+                except Exception as e:
+                    logger.debug(f"[ScrapeCreators] Instagram profile error: {e}")
+
+        # ── FACEBOOK ─────────────────────────────────────────────────
+        elif platform_lower == 'facebook':
+            clean_kw = keyword.strip().replace(' ', '').lower()
+            try:
+                url = f"{SCRAPECREATORS_BASE}/facebook/profile/posts?handle={quote(clean_kw)}"
+                resp = _sc_get(url)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    fb_posts = data.get('data', []) or []
+                    if isinstance(fb_posts, list):
+                        for item in fb_posts[:15]:
+                            try:
+                                post_url = item.get('url') or item.get('post_url') or ''
+                                content = item.get('text') or item.get('message') or item.get('content') or ''
+                                if not post_url and not content:
+                                    continue
+
+                                post_id = item.get('post_id') or item.get('id') or _make_id(post_url or content, 'FACEBOOK')
+                                author = item.get('username') or item.get('author') or clean_kw
+
+                                posted_at = datetime.now()
+                                ts = item.get('timestamp') or item.get('created_at')
+                                if ts:
+                                    try:
+                                        if isinstance(ts, (int, float)):
+                                            posted_at = datetime.utcfromtimestamp(ts)
+                                        else:
+                                            from dateutil import parser as dp
+                                            posted_at = dp.parse(str(ts)).replace(tzinfo=None)
+                                    except Exception:
+                                        pass
+
+                                if posted_at < cutoff:
+                                    continue
+
+                                media_urls = []
+                                media_type = 'text'
+                                if item.get('images'):
+                                    media_urls = list(item['images'])[:5]
+                                    media_type = 'image'
+                                elif item.get('video'):
+                                    media_urls = [item['video']]
+                                    media_type = 'video'
+
+                                posts.append(_post(
+                                    platform='FACEBOOK',
+                                    post_id=str(post_id),
+                                    content=content,
+                                    keyword=keyword,
+                                    post_url=post_url or f"https://facebook.com/{clean_kw}",
+                                    author_name=author,
+                                    author_handle=author,
+                                    media_type=media_type,
+                                    media_urls=media_urls,
+                                    likes_count=item.get('likes', 0) or item.get('like_count', 0),
+                                    comments_count=item.get('comments', 0) or item.get('comment_count', 0),
+                                    shares_count=item.get('shares', 0) or item.get('share_count', 0),
+                                    posted_at=posted_at,
+                                ))
+                            except Exception as e:
+                                logger.debug(f"[ScrapeCreators] FB post parse error: {e}")
+            except Exception as e:
+                logger.debug(f"[ScrapeCreators] Facebook error: {e}")
+
+        # ── LINKEDIN ─────────────────────────────────────────────────
+        elif platform_lower == 'linkedin':
+            clean_kw = keyword.strip().replace(' ', '-').lower()
+            try:
+                url = f"{SCRAPECREATORS_BASE}/linkedin/company/posts?handle={quote(clean_kw)}"
+                resp = _sc_get(url)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    li_posts = data.get('data', []) or []
+                    if isinstance(li_posts, list):
+                        for item in li_posts[:15]:
+                            try:
+                                post_url = item.get('url') or item.get('post_url') or ''
+                                content = item.get('text') or item.get('commentary') or item.get('content') or ''
+                                if not content:
+                                    continue
+
+                                post_id = item.get('id') or item.get('urn') or _make_id(post_url or content, 'LINKEDIN')
+                                author = item.get('author', {})
+                                if isinstance(author, dict):
+                                    author_name = author.get('name', '') or author.get('title', '')
+                                else:
+                                    author_name = str(author) if author else clean_kw
+
+                                posted_at = datetime.now()
+                                ts = item.get('timestamp') or item.get('published_at') or item.get('created_at')
+                                if ts:
+                                    try:
+                                        if isinstance(ts, (int, float)):
+                                            posted_at = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+                                        else:
+                                            from dateutil import parser as dp
+                                            posted_at = dp.parse(str(ts)).replace(tzinfo=None)
+                                    except Exception:
+                                        pass
+
+                                if posted_at < cutoff:
+                                    continue
+
+                                hashtags_list = re.findall(r'#(\w+)', content)
+
+                                posts.append(_post(
+                                    platform='LINKEDIN',
+                                    post_id=str(post_id),
+                                    content=content,
+                                    keyword=keyword,
+                                    post_url=post_url or f"https://linkedin.com/company/{clean_kw}",
+                                    author_name=author_name,
+                                    hashtags=hashtags_list,
+                                    likes_count=item.get('likes', 0) or item.get('like_count', 0),
+                                    comments_count=item.get('comments', 0) or item.get('comment_count', 0),
+                                    shares_count=item.get('shares', 0) or item.get('share_count', 0),
+                                    posted_at=posted_at,
+                                ))
+                            except Exception as e:
+                                logger.debug(f"[ScrapeCreators] LinkedIn post parse error: {e}")
+            except Exception as e:
+                logger.debug(f"[ScrapeCreators] LinkedIn error: {e}")
+
+        # ── TIKTOK ───────────────────────────────────────────────────
+        elif platform_lower == 'tiktok':
+            # Search by keyword
+            try:
+                url = f"{SCRAPECREATORS_BASE}/tiktok/search/keyword?keyword={quote(keyword)}"
+                resp = _sc_get(url)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    videos = data.get('data', []) or []
+                    if isinstance(videos, list):
+                        for item in videos[:20]:
+                            try:
+                                video_id = item.get('id') or item.get('video_id') or ''
+                                author_info = item.get('author', {}) or {}
+                                handle = author_info.get('uniqueId', '') or author_info.get('unique_id', '') or item.get('author_handle', '')
+                                author_name = author_info.get('nickname', '') or item.get('author_name', '')
+
+                                post_url = item.get('url') or ''
+                                if not post_url and handle and video_id:
+                                    post_url = f"https://www.tiktok.com/@{handle}/video/{video_id}"
+                                if not post_url:
+                                    continue
+
+                                desc = item.get('desc') or item.get('description') or item.get('text') or ''
+
+                                posted_at = datetime.now()
+                                create_time = item.get('createTime') or item.get('create_time') or item.get('timestamp')
+                                if create_time:
+                                    try:
+                                        if isinstance(create_time, (int, float)):
+                                            posted_at = datetime.utcfromtimestamp(int(create_time))
+                                    except Exception:
+                                        pass
+
+                                if posted_at < cutoff:
+                                    continue
+
+                                stats = item.get('stats', {}) or {}
+                                hashtags_list = re.findall(r'#(\w+)', desc)
+
+                                cover = item.get('video', {}).get('cover', '') or item.get('cover', '') or ''
+                                media_urls = [cover] if cover else []
+
+                                posts.append(_post(
+                                    platform='TIKTOK',
+                                    post_id=str(video_id),
+                                    content=desc,
+                                    keyword=keyword,
+                                    post_url=post_url,
+                                    author_name=author_name,
+                                    author_handle=handle,
+                                    media_type='video',
+                                    media_urls=media_urls,
+                                    hashtags=hashtags_list,
+                                    likes_count=stats.get('diggCount', 0) or stats.get('likes', 0) or item.get('likes', 0),
+                                    comments_count=stats.get('commentCount', 0) or stats.get('comments', 0) or item.get('comments', 0),
+                                    shares_count=stats.get('shareCount', 0) or stats.get('shares', 0) or item.get('shares', 0),
+                                    views_count=stats.get('playCount', 0) or stats.get('views', 0) or item.get('views', 0),
+                                    posted_at=posted_at,
+                                ))
+                            except Exception as e:
+                                logger.debug(f"[ScrapeCreators] TikTok video parse error: {e}")
+            except Exception as e:
+                logger.debug(f"[ScrapeCreators] TikTok search error: {e}")
+
+            # Also try hashtag search if keyword search returned few results
+            if len(posts) < 5:
+                try:
+                    hashtag_kw = keyword.replace(' ', '').lower()
+                    url = f"{SCRAPECREATORS_BASE}/tiktok/search/hashtag?keyword={quote(hashtag_kw)}"
+                    resp = _sc_get(url)
+                    if resp and resp.status_code == 200:
+                        data = resp.json()
+                        videos = data.get('data', []) or []
+                        if isinstance(videos, list):
+                            for item in videos[:10]:
+                                try:
+                                    video_id = item.get('id') or item.get('video_id') or ''
+                                    handle = (item.get('author', {}) or {}).get('uniqueId', '') or item.get('author_handle', '')
+                                    post_url = item.get('url') or ''
+                                    if not post_url and handle and video_id:
+                                        post_url = f"https://www.tiktok.com/@{handle}/video/{video_id}"
+                                    if not post_url:
+                                        continue
+                                    desc = item.get('desc') or item.get('description') or ''
+
+                                    # 24h cutoff check
+                                    posted_at = datetime.now()
+                                    create_time = item.get('createTime') or item.get('create_time') or item.get('timestamp')
+                                    if create_time and isinstance(create_time, (int, float)):
+                                        try:
+                                            posted_at = datetime.utcfromtimestamp(int(create_time))
+                                        except Exception:
+                                            pass
+                                    if posted_at < cutoff:
+                                        continue
+
+                                    posts.append(_post(
+                                        platform='TIKTOK',
+                                        post_id=str(video_id) or _make_id(post_url, 'TIKTOK'),
+                                        content=desc,
+                                        keyword=keyword,
+                                        post_url=post_url,
+                                        author_name=(item.get('author', {}) or {}).get('nickname', ''),
+                                        author_handle=handle,
+                                        media_type='video',
+                                        likes_count=item.get('likes', 0),
+                                        views_count=item.get('views', 0),
+                                        posted_at=posted_at,
+                                    ))
+                                except Exception:
+                                    continue
+                except Exception as e:
+                    logger.debug(f"[ScrapeCreators] TikTok hashtag error: {e}")
+
+        if posts:
+            logger.info(f"[ScrapeCreators] Found {len(posts)} {platform_upper} posts for '{keyword}'")
+
+    except Exception as e:
+        logger.warning(f"[ScrapeCreators] Error scraping {platform} for '{keyword}': {e}")
+
+    return posts
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SOURCE 1: TWSCRAPE — Twitter/X (FREE FALLBACK)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _scrape_twitter_twscrape(keyword, limit=20):
@@ -806,15 +1344,15 @@ def _scrape_bing(keyword, platform, session):
 
 class SocialScraper:
     """
-    Orchestrates social media scraping across multiple dedicated libraries.
+    Orchestrates social media scraping across multiple sources.
 
-    For each keyword, runs platform-specific scrapers in parallel:
-      - Twitter:   twscrape (primary) + Bing (fallback)
-      - Facebook:  facebook-scraper (primary) + Bing (fallback)
-      - Instagram: instaloader (primary) + Bing (fallback)
-      - LinkedIn:  linkedin-api (primary) + Bing (fallback)
-      - TikTok:    TikTokApi (primary) + Bing (fallback)
-      - Reddit:    JSON API (cross-platform mentions)
+    Priority:
+      1. ScrapeCreators API (paid, unified, all platforms) — if API key is set
+      2. Free libraries (twscrape, facebook-scraper, instaloader, etc.) — fallback
+      3. Bing search — last resort
+
+    If ScrapeCreators returns results for a platform+keyword, the free library
+    scraper for that combo is skipped to save time and avoid duplicates.
 
     Deduplicates by platform + post_id.
     Only returns posts from the last 24 hours.
@@ -822,6 +1360,7 @@ class SocialScraper:
 
     def __init__(self):
         self.session = _build_session()
+        self._has_sc_key = bool(os.environ.get('SCRAPECREATORS_API_KEY', ''))
 
     def scrape(self, keywords, platforms=None):
         """
@@ -834,6 +1373,8 @@ class SocialScraper:
         Returns:
             list of post dicts ready for the API
         """
+        global _sc_budget
+
         if not keywords:
             logger.warning("No keywords provided for social scraping")
             return []
@@ -841,52 +1382,93 @@ class SocialScraper:
         platforms = platforms or SUPPORTED_PLATFORMS
         platforms = [p.lower() for p in platforms if p.lower() != 'youtube']
 
-        logger.info(f"[SocialScraper] Keywords: {keywords} | Platforms: {platforms}")
+        # Reset credit budget for this run
+        budget_limit = int(os.environ.get('SCRAPECREATORS_BUDGET', '10'))
+        _sc_budget = _CreditBudget(budget_limit)
+
+        logger.info(f"[SocialScraper] Keywords: {keywords} | Platforms: {platforms} | ScrapeCreators: {'ON' if self._has_sc_key else 'OFF'} | Budget: {budget_limit} credits")
 
         all_posts = []
 
-        # Build tasks: (function, args)
+        # ── PHASE 1: ScrapeCreators (paid primary) ───────────────────
+        sc_results = {}  # Track which (keyword, platform) combos got results
+        sc_tasks = []
+
+        if self._has_sc_key:
+            for keyword in keywords[:5]:
+                for plat in platforms:
+                    sc_tasks.append((keyword, plat))
+
+            def run_sc(kw_plat):
+                kw, plat = kw_plat
+                try:
+                    return (kw, plat, _scrape_scrapecreators(kw, plat, self.session))
+                except Exception as e:
+                    logger.debug(f"[ScrapeCreators] Error ({plat}, {kw}): {e}")
+                    return (kw, plat, [])
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = {executor.submit(run_sc, t): t for t in sc_tasks}
+                for future in as_completed(futures, timeout=60):
+                    try:
+                        kw, plat, posts = future.result(timeout=15)
+                        if posts:
+                            all_posts.extend(posts)
+                            sc_results[(kw, plat)] = True
+                            logger.info(f"[ScrapeCreators] ✓ {len(posts)} {plat} posts for '{kw}'")
+                        else:
+                            sc_results[(kw, plat)] = False
+                    except Exception as e:
+                        logger.debug(f"[ScrapeCreators] Future error: {e}")
+
+            sc_total = sum(1 for v in sc_results.values() if v)
+            logger.info(f"[ScrapeCreators] Phase 1 done: {len(all_posts)} posts from {sc_total}/{len(sc_tasks)} combos | Credits used: {_sc_budget.used}/{budget_limit}")
+
+        # ── PHASE 2: Free library fallbacks (only for combos that SC missed) ──
         tasks = []
-        for keyword in keywords[:5]:  # Cap at 5 keywords
-            # Platform-specific library scrapers
-            if 'twitter' in platforms:
+        for keyword in keywords[:5]:
+            # Only run free scrapers if ScrapeCreators didn't return results
+            if 'twitter' in platforms and not sc_results.get((keyword, 'twitter')):
                 tasks.append(('twscrape', lambda kw=keyword: _scrape_twitter_twscrape(kw)))
-            if 'facebook' in platforms:
+            if 'facebook' in platforms and not sc_results.get((keyword, 'facebook')):
                 tasks.append(('facebook', lambda kw=keyword: _scrape_facebook_lib(kw)))
-            if 'instagram' in platforms:
+            if 'instagram' in platforms and not sc_results.get((keyword, 'instagram')):
                 tasks.append(('instagram', lambda kw=keyword: _scrape_instagram_instaloader(kw)))
-            if 'linkedin' in platforms:
+            if 'linkedin' in platforms and not sc_results.get((keyword, 'linkedin')):
                 tasks.append(('linkedin', lambda kw=keyword: _scrape_linkedin_lib(kw)))
-            if 'tiktok' in platforms:
+            if 'tiktok' in platforms and not sc_results.get((keyword, 'tiktok')):
                 tasks.append(('tiktok', lambda kw=keyword: _scrape_tiktok_api(kw)))
 
-            # Reddit (cross-platform mentions)
+            # Reddit always runs (cross-platform mentions, free, fast)
             tasks.append(('reddit', lambda kw=keyword: _scrape_reddit(kw, self.session)))
 
-            # Bing fallback per platform
+            # Bing fallback only for platforms that got nothing from SC or free libs
             for plat in platforms:
-                tasks.append(('bing', lambda kw=keyword, p=plat: _scrape_bing(kw, p, self.session)))
+                if not sc_results.get((keyword, plat)):
+                    tasks.append(('bing', lambda kw=keyword, p=plat: _scrape_bing(kw, p, self.session)))
 
-        # Run all tasks in parallel (max 8 workers)
-        def run_task(task):
-            source, fn = task
-            try:
-                return fn()
-            except Exception as e:
-                logger.debug(f"[SocialScraper] Task error ({source}): {e}")
-            return []
+        if tasks:
+            logger.info(f"[SocialScraper] Running {len(tasks)} fallback tasks")
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(run_task, t): t for t in tasks}
-            for future in as_completed(futures, timeout=90):
+            def run_task(task):
+                source, fn = task
                 try:
-                    result = future.result(timeout=10)
-                    if result:
-                        all_posts.extend(result)
+                    return fn()
                 except Exception as e:
-                    logger.debug(f"[SocialScraper] Future error: {e}")
+                    logger.debug(f"[SocialScraper] Task error ({source}): {e}")
+                return []
 
-        # Deduplicate by platform + post_id
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(run_task, t): t for t in tasks}
+                for future in as_completed(futures, timeout=90):
+                    try:
+                        result = future.result(timeout=10)
+                        if result:
+                            all_posts.extend(result)
+                    except Exception as e:
+                        logger.debug(f"[SocialScraper] Future error: {e}")
+
+        # ── PHASE 3: Deduplicate ─────────────────────────────────────
         seen = set()
         unique_posts = []
         for post in all_posts:
@@ -896,5 +1478,5 @@ class SocialScraper:
                 if post['platform'].lower() in platforms or post['platform'] in [p.upper() for p in platforms]:
                     unique_posts.append(post)
 
-        logger.info(f"[SocialScraper] Total unique posts: {len(unique_posts)} (from {len(all_posts)} raw)")
+        logger.info(f"[SocialScraper] Total unique posts: {len(unique_posts)} (from {len(all_posts)} raw) | ScrapeCreators credits used: {_sc_budget.used}/{budget_limit}")
         return unique_posts

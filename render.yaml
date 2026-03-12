@@ -11,3 +11,5 @@ services:
         value: production
       - key: PORT
         value: 5000
+      - key: SCRAPECREATORS_API_KEY
+        sync: false
