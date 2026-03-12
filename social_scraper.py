@@ -253,6 +253,15 @@ _SC_ENDPOINTS = {
     },
 }
 
+# Platforms that support TRUE keyword search on ScrapeCreators.
+# Twitter, Facebook, LinkedIn are profile-only (no keyword search) — useless
+# for media monitoring, so they skip ScrapeCreators and go to Bing/free scrapers.
+_SC_KEYWORD_PLATFORMS = {
+    'tiktok':    '/tiktok/search/keyword',
+    'instagram': '/instagram/search/reels',
+    'reddit':    '/reddit/search',
+}
+
 
 def _scrape_scrapecreators(keyword, platform, session):
     """
