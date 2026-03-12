@@ -10,4 +10,10 @@ apscheduler==3.10.4
 python-dotenv==1.0.0
 lxml==6.0.2
 gunicorn==21.2.0
-snscrape>=0.7.0.20230622
+
+# Social media scrapers (each is optional — scraper degrades gracefully)
+twscrape>=0.14              # Twitter/X GraphQL API scraper
+facebook-scraper>=0.2.59    # Facebook public page scraper
+instaloader>=4.13           # Instagram public content scraper
+linkedin-api>=2.2.0         # LinkedIn HTTP API (no Selenium)
+TikTokApi>=6.5.0            # TikTok unofficial API wrapper
