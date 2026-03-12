@@ -225,7 +225,7 @@ class _CreditBudget:
             return max(0, self._limit - self._used)
 
 # Global budget instance — reset per scrape run in SocialScraper.scrape()
-_sc_budget = _CreditBudget(int(os.environ.get('SCRAPECREATORS_BUDGET', '10')))
+_sc_budget = _CreditBudget(int(os.environ.get('SCRAPECREATORS_BUDGET', '6')))
 
 # Maps our platform names to ScrapeCreators endpoint paths + params
 _SC_ENDPOINTS = {
@@ -1383,7 +1383,7 @@ class SocialScraper:
         platforms = [p.lower() for p in platforms if p.lower() != 'youtube']
 
         # Reset credit budget for this run
-        budget_limit = int(os.environ.get('SCRAPECREATORS_BUDGET', '10'))
+        budget_limit = int(os.environ.get('SCRAPECREATORS_BUDGET', '6'))
         _sc_budget = _CreditBudget(budget_limit)
 
         logger.info(f"[SocialScraper] Keywords: {keywords} | Platforms: {platforms} | ScrapeCreators: {'ON' if self._has_sc_key else 'OFF'} | Budget: {budget_limit} credits")
@@ -1391,12 +1391,16 @@ class SocialScraper:
         all_posts = []
 
         # ── PHASE 1: ScrapeCreators (paid primary) ───────────────────
+        # Only send platforms that have keyword search endpoints.
+        # Twitter, Facebook, LinkedIn are profile-only on ScrapeCreators
+        # (no keyword search), so they go straight to Bing/free scrapers.
         sc_results = {}  # Track which (keyword, platform) combos got results
         sc_tasks = []
+        sc_eligible = [p for p in platforms if p in _SC_KEYWORD_PLATFORMS]
 
-        if self._has_sc_key:
+        if self._has_sc_key and sc_eligible:
             for keyword in keywords[:5]:
-                for plat in platforms:
+                for plat in sc_eligible:
                     sc_tasks.append((keyword, plat))
 
             def run_sc(kw_plat):
