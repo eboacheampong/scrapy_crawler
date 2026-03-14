@@ -75,7 +75,9 @@ def _sleep(lo=0.5, hi=2.0):
     time.sleep(random.uniform(lo, hi))
 
 
-def _cutoff(hours=24):
+def _cutoff(hours=168):
+    """Default to 7 days (168h) for media monitoring. 24h is too aggressive
+    for niche keywords — most results would be silently dropped."""
     return datetime.now() - timedelta(hours=hours)
 
 
@@ -395,7 +397,12 @@ def _scrape_scrapecreators(keyword, platform, session):
                 if resp and resp.status_code == 200:
                     data = resp.json()
                     # v2 returns `reels` key, fall back to `data` for compatibility
+                    logger.info(f"[ScrapeCreators] Instagram reels response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
                     items = data.get('reels', []) or data.get('data', []) or []
+                    if isinstance(items, dict):
+                        # Handle nested structure
+                        items = items.get('reels', []) or items.get('items', []) or []
+                    logger.info(f"[ScrapeCreators] Instagram reels items count: {len(items) if isinstance(items, list) else 'not a list'}")
                     if isinstance(items, list):
                         for item in items[:20]:
                             try:
@@ -625,7 +632,13 @@ def _scrape_scrapecreators(keyword, platform, session):
                 if resp and resp.status_code == 200:
                     data = resp.json()
                     # ScrapeCreators TikTok keyword search returns `search_item_list` (not `data`)
+                    # Log top-level keys for debugging
+                    logger.info(f"[ScrapeCreators] TikTok keyword response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
                     videos = data.get('search_item_list', []) or data.get('data', []) or []
+                    if isinstance(videos, dict):
+                        # Sometimes the data is nested: data.search_item_list or data.items
+                        videos = videos.get('search_item_list', []) or videos.get('items', []) or videos.get('videos', []) or []
+                    logger.info(f"[ScrapeCreators] TikTok keyword videos count: {len(videos) if isinstance(videos, list) else 'not a list'}")
                     if isinstance(videos, list):
                         for item in videos[:20]:
                             try:
@@ -686,7 +699,7 @@ def _scrape_scrapecreators(keyword, platform, session):
             if len(posts) < 5:
                 try:
                     hashtag_kw = keyword.replace(' ', '').lower()
-                    url = f"{SCRAPECREATORS_BASE}/tiktok/search/hashtag?query={quote(hashtag_kw)}"
+                    url = f"{SCRAPECREATORS_BASE}/tiktok/search/hashtag?hashtag={quote(hashtag_kw)}"
                     resp = _sc_get(url)
                     if resp and resp.status_code == 200:
                         data = resp.json()
