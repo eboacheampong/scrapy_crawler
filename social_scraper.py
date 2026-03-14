@@ -234,7 +234,7 @@ _SC_ENDPOINTS = {
         'profile': '/twitter/profile',           # Get profile info
     },
     'instagram': {
-        'search': '/instagram/search/reels',     # Search reels by keyword
+        'search': '/v2/instagram/reels/search',  # Search reels by keyword (v2, uses `query` param)
         'profile': '/instagram/profile',         # Get profile + recent posts
         'posts': '/instagram/user/posts',        # Get user posts
     },
@@ -247,8 +247,8 @@ _SC_ENDPOINTS = {
         'profile': '/linkedin/person/profile',   # Get person profile
     },
     'tiktok': {
-        'search': '/tiktok/search/keyword',      # Search by keyword
-        'hashtag': '/tiktok/search/hashtag',      # Search by hashtag
+        'search': '/tiktok/search/keyword',      # Search by keyword (uses `query` param)
+        'hashtag': '/tiktok/search/hashtag',      # Search by hashtag (uses `query` param)
         'profile': '/tiktok/profile',            # Get profile info
     },
 }
@@ -258,7 +258,7 @@ _SC_ENDPOINTS = {
 # for media monitoring, so they skip ScrapeCreators and go to Bing/free scrapers.
 _SC_KEYWORD_PLATFORMS = {
     'tiktok':    '/tiktok/search/keyword',
-    'instagram': '/instagram/search/reels',
+    'instagram': '/v2/instagram/reels/search',
     'reddit':    '/reddit/search',
 }
 
@@ -288,8 +288,11 @@ def _scrape_scrapecreators(keyword, platform, session):
         if not _sc_budget.try_spend(1):
             logger.info(f"[ScrapeCreators] Budget exhausted ({_sc_budget.used}/{_sc_budget._limit}), skipping: {url.split('?')[0]}")
             return None
-        logger.debug(f"[ScrapeCreators] Credit {_sc_budget.used}/{_sc_budget._limit}: {url.split('?')[0]}")
+        logger.info(f"[ScrapeCreators] Credit {_sc_budget.used}/{_sc_budget._limit}: GET {url}")
         resp = session.get(url, headers=headers, timeout=20)
+        logger.info(f"[ScrapeCreators] Response: HTTP {resp.status_code} | Size: {len(resp.text)} bytes")
+        if resp.status_code != 200:
+            logger.warning(f"[ScrapeCreators] Non-200 response: {resp.text[:300]}")
         return resp
 
     try:
@@ -384,13 +387,15 @@ def _scrape_scrapecreators(keyword, platform, session):
 
         # ── INSTAGRAM ────────────────────────────────────────────────
         elif platform_lower == 'instagram':
-            # Search reels by keyword (uses Google search under the hood)
+            # Search reels by keyword — ScrapeCreators v2 endpoint uses `query` param
+            # and returns results under `reels` key
             try:
-                url = f"{SCRAPECREATORS_BASE}/instagram/search/reels?keyword={quote(keyword)}"
+                url = f"{SCRAPECREATORS_BASE.replace('/v1', '/v2')}/instagram/reels/search?query={quote(keyword)}"
                 resp = _sc_get(url)
                 if resp and resp.status_code == 200:
                     data = resp.json()
-                    items = data.get('data', []) or []
+                    # v2 returns `reels` key, fall back to `data` for compatibility
+                    items = data.get('reels', []) or data.get('data', []) or []
                     if isinstance(items, list):
                         for item in items[:20]:
                             try:
@@ -613,13 +618,14 @@ def _scrape_scrapecreators(keyword, platform, session):
 
         # ── TIKTOK ───────────────────────────────────────────────────
         elif platform_lower == 'tiktok':
-            # Search by keyword
+            # Search by keyword — ScrapeCreators uses `query` param, not `keyword`
             try:
-                url = f"{SCRAPECREATORS_BASE}/tiktok/search/keyword?keyword={quote(keyword)}"
+                url = f"{SCRAPECREATORS_BASE}/tiktok/search/keyword?query={quote(keyword)}"
                 resp = _sc_get(url)
                 if resp and resp.status_code == 200:
                     data = resp.json()
-                    videos = data.get('data', []) or []
+                    # ScrapeCreators TikTok keyword search returns `search_item_list` (not `data`)
+                    videos = data.get('search_item_list', []) or data.get('data', []) or []
                     if isinstance(videos, list):
                         for item in videos[:20]:
                             try:
@@ -680,7 +686,7 @@ def _scrape_scrapecreators(keyword, platform, session):
             if len(posts) < 5:
                 try:
                     hashtag_kw = keyword.replace(' ', '').lower()
-                    url = f"{SCRAPECREATORS_BASE}/tiktok/search/hashtag?keyword={quote(hashtag_kw)}"
+                    url = f"{SCRAPECREATORS_BASE}/tiktok/search/hashtag?query={quote(hashtag_kw)}"
                     resp = _sc_get(url)
                     if resp and resp.status_code == 200:
                         data = resp.json()
