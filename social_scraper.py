@@ -250,7 +250,7 @@ _SC_ENDPOINTS = {
     },
     'tiktok': {
         'search': '/tiktok/search/keyword',      # Search by keyword (uses `query` param)
-        'hashtag': '/tiktok/search/hashtag',      # Search by hashtag (uses `query` param)
+        'hashtag': '/tiktok/search/hashtag',      # Search by hashtag (uses `hashtag` param)
         'profile': '/tiktok/profile',            # Get profile info
     },
 }
@@ -626,8 +626,9 @@ def _scrape_scrapecreators(keyword, platform, session):
         # ── TIKTOK ───────────────────────────────────────────────────
         elif platform_lower == 'tiktok':
             # Search by keyword — ScrapeCreators uses `query` param, not `keyword`
+            # Use trim=true to reduce response size (1.8MB → much smaller)
             try:
-                url = f"{SCRAPECREATORS_BASE}/tiktok/search/keyword?query={quote(keyword)}"
+                url = f"{SCRAPECREATORS_BASE}/tiktok/search/keyword?query={quote(keyword)}&trim=true"
                 resp = _sc_get(url)
                 if resp and resp.status_code == 200:
                     data = resp.json()
@@ -1456,31 +1457,26 @@ class SocialScraper:
             sc_total = sum(1 for v in sc_results.values() if v)
             logger.info(f"[ScrapeCreators] Phase 1 done: {len(all_posts)} posts from {sc_total}/{len(sc_tasks)} combos | Credits used: {_sc_budget.used}/{budget_limit}")
 
-        # ── PHASE 2: Free library fallbacks (only for combos that SC missed) ──
+        # ── PHASE 2: Fast fallbacks only (Reddit + Bing) ──────────────
+        # Free library scrapers (twscrape, instaloader, facebook-scraper,
+        # linkedin-api, TikTokApi) are SKIPPED on production because:
+        #   - twscrape: needs pre-configured accounts + has event loop issues
+        #   - instaloader: needs login (403 Forbidden without it)
+        #   - TikTokApi: needs playwright browser deps installed
+        #   - facebook-scraper / linkedin-api: unreliable, often blocked
+        # Only Reddit (free JSON API) and Bing (HTML scrape) are fast & reliable.
         tasks = []
         for keyword in keywords[:5]:
-            # Only run free scrapers if ScrapeCreators didn't return results
-            if 'twitter' in platforms and not sc_results.get((keyword, 'twitter')):
-                tasks.append(('twscrape', lambda kw=keyword: _scrape_twitter_twscrape(kw)))
-            if 'facebook' in platforms and not sc_results.get((keyword, 'facebook')):
-                tasks.append(('facebook', lambda kw=keyword: _scrape_facebook_lib(kw)))
-            if 'instagram' in platforms and not sc_results.get((keyword, 'instagram')):
-                tasks.append(('instagram', lambda kw=keyword: _scrape_instagram_instaloader(kw)))
-            if 'linkedin' in platforms and not sc_results.get((keyword, 'linkedin')):
-                tasks.append(('linkedin', lambda kw=keyword: _scrape_linkedin_lib(kw)))
-            if 'tiktok' in platforms and not sc_results.get((keyword, 'tiktok')):
-                tasks.append(('tiktok', lambda kw=keyword: _scrape_tiktok_api(kw)))
-
             # Reddit always runs (cross-platform mentions, free, fast)
             tasks.append(('reddit', lambda kw=keyword: _scrape_reddit(kw, self.session)))
 
-            # Bing fallback only for platforms that got nothing from SC or free libs
+            # Bing fallback for platforms that got nothing from ScrapeCreators
             for plat in platforms:
                 if not sc_results.get((keyword, plat)):
                     tasks.append(('bing', lambda kw=keyword, p=plat: _scrape_bing(kw, p, self.session)))
 
         if tasks:
-            logger.info(f"[SocialScraper] Running {len(tasks)} fallback tasks")
+            logger.info(f"[SocialScraper] Running {len(tasks)} fast fallback tasks (Reddit + Bing)")
 
             def run_task(task):
                 source, fn = task
@@ -1492,9 +1488,9 @@ class SocialScraper:
 
             with ThreadPoolExecutor(max_workers=8) as executor:
                 futures = {executor.submit(run_task, t): t for t in tasks}
-                for future in as_completed(futures, timeout=90):
+                for future in as_completed(futures, timeout=30):
                     try:
-                        result = future.result(timeout=10)
+                        result = future.result(timeout=8)
                         if result:
                             all_posts.extend(result)
                     except Exception as e:
