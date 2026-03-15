@@ -1246,23 +1246,20 @@ def _scrape_reddit(keyword, session):
 
             # Check if the Reddit post links to a social media platform
             ext_url = d.get('url', '')
-            platform = _detect_platform(ext_url, title, '')
+            platform = _detect_platform(ext_url, '', '')
             if not platform:
-                lower = (title + ' ' + selftext).lower()
-                if any(w in lower for w in ['twitter', 'tweet', 'x.com']):
-                    platform = 'TWITTER'
-                elif 'instagram' in lower:
-                    platform = 'INSTAGRAM'
-                elif 'facebook' in lower:
-                    platform = 'FACEBOOK'
-                elif 'linkedin' in lower:
-                    platform = 'LINKEDIN'
-                elif 'tiktok' in lower:
-                    platform = 'TIKTOK'
-                else:
+                # Only use text-based detection if there's an actual external URL
+                # (not a reddit self-post or reddit-hosted image)
+                if ext_url and 'reddit.com' not in ext_url and 'redd.it' not in ext_url and 'i.redd.it' not in ext_url and 'v.redd.it' not in ext_url:
+                    platform = _detect_platform(ext_url, title, '')
+                if not platform:
                     continue
 
-            final_url = ext_url if ext_url and 'reddit.com' not in ext_url else post_url
+            # Only use the external URL if it actually belongs to the detected platform
+            final_url = ext_url if ext_url and 'reddit.com' not in ext_url and 'redd.it' not in ext_url else None
+            if not final_url:
+                # No valid external URL — skip this post, it's just a Reddit discussion
+                continue
             posts.append(_post(
                 platform=platform,
                 post_id=d.get('id', _make_id(post_url, platform)),
