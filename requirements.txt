@@ -17,3 +17,4 @@ facebook-scraper>=0.2.59    # Facebook public page scraper
 instaloader>=4.13           # Instagram public content scraper
 linkedin-api>=2.2.0         # LinkedIn HTTP API (no Selenium)
 TikTokApi>=6.5.0            # TikTok unofficial API wrapper
+scrapetube>=2.5.0           # YouTube search/channel scraper (no API key needed)

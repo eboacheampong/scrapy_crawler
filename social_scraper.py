@@ -37,7 +37,7 @@ from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PLATFORMS = ['twitter', 'instagram', 'facebook', 'linkedin', 'tiktok']
+SUPPORTED_PLATFORMS = ['twitter', 'instagram', 'facebook', 'linkedin', 'tiktok', 'youtube']
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -114,6 +114,13 @@ def _extract_author(url, platform, title=''):
             m = re.search(r'tiktok\.com/@([^/?#]+)', url)
             if m:
                 return m.group(1)
+        elif platform == 'YOUTUBE':
+            m = re.search(r'youtube\.com/(?:channel/|@)([^/?#]+)', url)
+            if m:
+                return m.group(1)
+            m = re.search(r'youtube\.com/([^/?#]+)', url)
+            if m and m.group(1).lower() not in ('watch', 'results', 'playlist', 'shorts', 'feed', 'gaming', 'premium'):
+                return m.group(1)
     except Exception:
         pass
     return ''
@@ -138,6 +145,10 @@ def _extract_post_id(url, platform):
             m = re.search(r'activity-(\d+)', url)
             if m:
                 return f"li_{m.group(1)}"
+        elif platform == 'YOUTUBE':
+            m = re.search(r'(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})', url)
+            if m:
+                return f"yt_{m.group(1)}"
     except Exception:
         pass
     return _make_id(url, platform)
@@ -158,6 +169,11 @@ def _build_embed(url, platform):
             return f'<iframe src="https://www.tiktok.com/embed/v2/{m.group(1)}" width="100%" height="750" frameborder="0" allowfullscreen></iframe>'
     elif platform == 'LINKEDIN':
         return f'<a href="{url}" target="_blank" rel="noopener">View on LinkedIn</a>'
+    elif platform == 'YOUTUBE':
+        m = re.search(r'(?:v=|youtu\.be/|/shorts/)([A-Za-z0-9_-]{11})', url)
+        if m:
+            return f'<iframe width="100%" height="400" src="https://www.youtube.com/embed/{m.group(1)}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>'
+        return f'<a href="{url}" target="_blank" rel="noopener">View on YouTube</a>'
     return ''
 
 
@@ -1286,6 +1302,7 @@ def _detect_platform(url, title, platform_filter):
         ('FACEBOOK', ['facebook.com/', 'fb.com/']),
         ('LINKEDIN', ['linkedin.com/']),
         ('TIKTOK', ['tiktok.com/']),
+        ('YOUTUBE', ['youtube.com/', 'youtu.be/']),
     ]
     for platform, domains in checks:
         if any(d in url_lower for d in domains):
@@ -1300,11 +1317,213 @@ def _detect_platform(url, title, platform_filter):
             'FACEBOOK': ['facebook', 'fb'],
             'LINKEDIN': ['linkedin'],
             'TIKTOK': ['tiktok'],
+            'YOUTUBE': ['youtube', 'youtu.be'],
         }
         for hint in hints.get(pf, []):
             if hint in title_lower:
                 return pf
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SOURCE 8: YOUTUBE (scrapetube — no API key needed, or Data API v3 if key set)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _scrape_youtube_api(keyword, session, max_results=10):
+    """
+    Search YouTube for videos matching keyword.
+    Uses scrapetube (no API key) as primary, falls back to YouTube Data API v3
+    if YOUTUBE_API_KEY is set, then Bing as last resort.
+    """
+    posts = []
+    cutoff = _cutoff(hours=168)  # 7 days
+
+    # ── PRIMARY: scrapetube (free, no API key, no Selenium) ──
+    try:
+        import scrapetube
+        videos = scrapetube.get_search(keyword, limit=max_results)
+        for video in videos:
+            video_id = video.get('videoId', '')
+            if not video_id:
+                continue
+
+            title = ''
+            try:
+                title = video.get('title', {}).get('runs', [{}])[0].get('text', '')
+            except (AttributeError, IndexError, TypeError):
+                title = str(video.get('title', ''))
+
+            # Channel/author info
+            channel_name = ''
+            channel_id = ''
+            try:
+                channel_name = video.get('ownerText', {}).get('runs', [{}])[0].get('text', '')
+                nav = video.get('ownerText', {}).get('runs', [{}])[0].get('navigationEndpoint', {})
+                channel_id = nav.get('browseEndpoint', {}).get('browseId', '')
+            except (AttributeError, IndexError, TypeError):
+                pass
+
+            # View count
+            views = 0
+            try:
+                view_text = video.get('viewCountText', {}).get('simpleText', '0')
+                views = int(re.sub(r'[^\d]', '', view_text))
+            except (ValueError, AttributeError, TypeError):
+                pass
+
+            # Published time (relative like "2 days ago")
+            published_text = ''
+            try:
+                published_text = video.get('publishedTimeText', {}).get('simpleText', '')
+            except (AttributeError, TypeError):
+                pass
+
+            # Parse relative time to approximate date
+            posted_at = datetime.now()
+            if published_text:
+                try:
+                    lower = published_text.lower()
+                    num_match = re.search(r'(\d+)', lower)
+                    num = int(num_match.group(1)) if num_match else 1
+                    if 'hour' in lower:
+                        posted_at = datetime.now() - timedelta(hours=num)
+                    elif 'day' in lower:
+                        posted_at = datetime.now() - timedelta(days=num)
+                    elif 'week' in lower:
+                        posted_at = datetime.now() - timedelta(weeks=num)
+                    elif 'month' in lower:
+                        posted_at = datetime.now() - timedelta(days=num * 30)
+                    elif 'year' in lower:
+                        posted_at = datetime.now() - timedelta(days=num * 365)
+                except Exception:
+                    pass
+
+            # Skip if older than cutoff
+            if posted_at < cutoff:
+                continue
+
+            # Thumbnail
+            thumbnail = ''
+            try:
+                thumbs = video.get('thumbnail', {}).get('thumbnails', [])
+                thumbnail = thumbs[-1].get('url', '') if thumbs else ''
+            except (AttributeError, IndexError, TypeError):
+                pass
+
+            # Description snippet
+            desc = ''
+            try:
+                snippets = video.get('detailedMetadataSnippets', [{}])
+                if snippets:
+                    runs = snippets[0].get('snippetText', {}).get('runs', [])
+                    desc = ''.join(r.get('text', '') for r in runs)
+            except (AttributeError, IndexError, TypeError):
+                pass
+
+            # Length
+            length_text = ''
+            try:
+                length_text = video.get('lengthText', {}).get('simpleText', '')
+            except (AttributeError, TypeError):
+                pass
+
+            post_url = f'https://www.youtube.com/watch?v={video_id}'
+            content = f"{title}\n{desc[:300]}" if desc else title
+
+            posts.append(_post(
+                platform='YOUTUBE',
+                post_id=f'yt_{video_id}',
+                content=content,
+                keyword=keyword,
+                post_url=post_url,
+                author_name=channel_name,
+                author_handle=channel_id,
+                media_type='video',
+                media_urls=[thumbnail] if thumbnail else [],
+                views_count=views,
+                posted_at=posted_at,
+            ))
+
+        if posts:
+            logger.info(f"[YouTube/scrapetube] ✓ {len(posts)} videos for '{keyword}'")
+            return posts
+
+    except ImportError:
+        logger.debug("[YouTube] scrapetube not installed — trying API fallback")
+    except Exception as e:
+        logger.debug(f"[YouTube/scrapetube] Error: {e}")
+
+    # ── FALLBACK: YouTube Data API v3 (if key is set) ──
+    api_key = os.environ.get('YOUTUBE_API_KEY', '')
+    if api_key:
+        try:
+            published_after = cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')
+            search_url = (
+                f'https://www.googleapis.com/youtube/v3/search'
+                f'?part=snippet&type=video&order=date&maxResults={max_results}'
+                f'&q={quote(keyword)}&publishedAfter={published_after}&key={api_key}'
+            )
+            resp = session.get(search_url, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get('items', [])
+                video_ids = [item['id']['videoId'] for item in items if item.get('id', {}).get('videoId')]
+                stats_map = {}
+                if video_ids:
+                    stats_url = (
+                        f'https://www.googleapis.com/youtube/v3/videos'
+                        f'?part=statistics&id={",".join(video_ids)}&key={api_key}'
+                    )
+                    stats_resp = session.get(stats_url, timeout=10)
+                    if stats_resp.status_code == 200:
+                        for sv in stats_resp.json().get('items', []):
+                            s = sv.get('statistics', {})
+                            stats_map[sv['id']] = {
+                                'views': int(s.get('viewCount', 0)),
+                                'likes': int(s.get('likeCount', 0)),
+                                'comments': int(s.get('commentCount', 0)),
+                            }
+                for item in items:
+                    video_id = item.get('id', {}).get('videoId')
+                    if not video_id:
+                        continue
+                    snippet = item.get('snippet', {})
+                    post_url = f'https://www.youtube.com/watch?v={video_id}'
+                    content = snippet.get('title', '')
+                    desc = snippet.get('description', '')
+                    if desc:
+                        content = f"{content}\n{desc[:300]}"
+                    posted_at = datetime.now()
+                    if snippet.get('publishedAt'):
+                        try:
+                            posted_at = datetime.fromisoformat(snippet['publishedAt'].replace('Z', '+00:00')).replace(tzinfo=None)
+                        except Exception:
+                            pass
+                    stats = stats_map.get(video_id, {})
+                    thumbnail = snippet.get('thumbnails', {}).get('high', {}).get('url', '')
+                    posts.append(_post(
+                        platform='YOUTUBE',
+                        post_id=f'yt_{video_id}',
+                        content=content,
+                        keyword=keyword,
+                        post_url=post_url,
+                        author_name=snippet.get('channelTitle', ''),
+                        author_handle=snippet.get('channelId', ''),
+                        media_type='video',
+                        media_urls=[thumbnail] if thumbnail else [],
+                        views_count=stats.get('views', 0),
+                        likes_count=stats.get('likes', 0),
+                        comments_count=stats.get('comments', 0),
+                        posted_at=posted_at,
+                    ))
+                if posts:
+                    logger.info(f"[YouTube API] ✓ {len(posts)} videos for '{keyword}'")
+            else:
+                logger.debug(f"[YouTube API] HTTP {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"[YouTube API] Error: {e}")
+
+    return posts
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1320,6 +1539,7 @@ def _scrape_bing(keyword, platform, session):
         'facebook': 'site:facebook.com',
         'linkedin': 'site:linkedin.com/posts/',
         'tiktok': 'site:tiktok.com/@',
+        'youtube': 'site:youtube.com/watch',
     }
     site_q = site_map.get(platform, '')
     if not site_q:
@@ -1351,7 +1571,7 @@ def _scrape_bing(keyword, platform, session):
                 continue
             author = _extract_author(result_url, detected, title)
             post_id = _extract_post_id(result_url, detected)
-            media_type = 'video' if detected == 'TIKTOK' or '/reel/' in result_url else 'text'
+            media_type = 'video' if detected in ('TIKTOK', 'YOUTUBE') or '/reel/' in result_url else 'text'
             posts.append(_post(
                 platform=detected, post_id=post_id, content=content,
                 keyword=keyword, post_url=result_url, author_name=author,
@@ -1406,7 +1626,7 @@ class SocialScraper:
             return []
 
         platforms = platforms or SUPPORTED_PLATFORMS
-        platforms = [p.lower() for p in platforms if p.lower() != 'youtube']
+        platforms = [p.lower() for p in platforms]
 
         # Reset credit budget for this run
         budget_limit = int(os.environ.get('SCRAPECREATORS_BUDGET', '6'))
@@ -1454,18 +1674,22 @@ class SocialScraper:
             sc_total = sum(1 for v in sc_results.values() if v)
             logger.info(f"[ScrapeCreators] Phase 1 done: {len(all_posts)} posts from {sc_total}/{len(sc_tasks)} combos | Credits used: {_sc_budget.used}/{budget_limit}")
 
-        # ── PHASE 2: Fast fallbacks only (Reddit + Bing) ──────────────
+        # ── PHASE 2: Fast fallbacks only (Reddit + Bing + YouTube API) ──
         # Free library scrapers (twscrape, instaloader, facebook-scraper,
         # linkedin-api, TikTokApi) are SKIPPED on production because:
         #   - twscrape: needs pre-configured accounts + has event loop issues
         #   - instaloader: needs login (403 Forbidden without it)
         #   - TikTokApi: needs playwright browser deps installed
         #   - facebook-scraper / linkedin-api: unreliable, often blocked
-        # Only Reddit (free JSON API) and Bing (HTML scrape) are fast & reliable.
+        # Only Reddit (free JSON API), YouTube API, and Bing (HTML scrape) are fast & reliable.
         tasks = []
         for keyword in keywords[:5]:
             # Reddit always runs (cross-platform mentions, free, fast)
             tasks.append(('reddit', lambda kw=keyword: _scrape_reddit(kw, self.session)))
+
+            # YouTube API (if key is set and youtube is in platforms)
+            if 'youtube' in platforms:
+                tasks.append(('youtube', lambda kw=keyword: _scrape_youtube_api(kw, self.session)))
 
             # Bing fallback for platforms that got nothing from ScrapeCreators
             for plat in platforms:
